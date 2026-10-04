@@ -268,6 +268,46 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 }
 .server-row.is-inactive input { color: var(--muted); }
 
+/* Login */
+
+.card.login { max-width: 380px; margin: 32px auto 0; display: grid; gap: 4px; }
+.card.login input { font-size: 1.3rem; letter-spacing: .2em; text-align: center; }
+.btn.block { width: 100%; }
+.block { display: block; }
+
+/* Daily entry */
+
+.date-input { width: auto; min-height: 36px; padding: 4px 8px; }
+.row.date-nav { gap: 4px; flex-wrap: nowrap; }
+.tips-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+.tips-grid input { font-size: 1.15rem; font-weight: 700; }
+.computed {
+	display: flex; align-items: center;
+	min-height: 42px; padding: 0 10px;
+	border-radius: var(--radius-sm);
+	background: var(--night-soft); color: var(--night);
+	font-size: 1.15rem; font-weight: 700;
+	font-variant-numeric: tabular-nums;
+}
+.split-line { font-weight: 600; color: var(--accent); }
+.notice.lock { background: var(--surface-2); border: 1px solid var(--line); }
+.entry-grid .hours-cell { width: 96px; }
+.entry-grid small { font-weight: 400; font-size: .75rem; }
+input:disabled { opacity: .65; background: var(--surface-2); }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--surface-2); }
+.badge.admin { background: var(--night-soft); color: var(--night); }
+.facts { margin: 0 0 16px; padding-left: 18px; color: var(--muted); }
+.facts li { margin: 2px 0; }
+input[type="number"], input[type="password"] {
+	font: inherit; color: inherit;
+	background: var(--surface);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-sm);
+	padding: 9px 10px; min-height: 42px; width: 100%;
+}
+.card.form > .btn { margin-top: 4px; }
+
 /* Toasts */
 
 .toast-box {
@@ -292,6 +332,9 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	.cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	.server-row { grid-template-columns: minmax(0, 1fr) auto; }
 	.server-row .row.tight { grid-column: 1 / -1; }
+	.tips-grid { grid-template-columns: 1fr 1fr; }
+	.tips-grid > :last-child { grid-column: 1 / -1; }
+	.entry-grid .hours-cell { width: 72px; }
 	.report-head h2 { font-size: 1.2rem; }
 }
 

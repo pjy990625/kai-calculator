@@ -1,10 +1,11 @@
 {
   "name": "kai-calculator",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Restaurant tip calculator — split day/night shift tips by hours, 2-week and monthly reports",
+  "description": "Restaurant tip calculator — 60/40 day/night tip split by hours, shared Supabase database, 2-week reports",
   "scripts": {
-    "test": "node --test tests/calc.test.js",
+    "test": "node --test tests/*.test.js",
+    "test:db": "bash tests/db/run.sh",
     "start": "python3 -m http.server 8000"
   },
   "engines": {

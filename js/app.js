@@ -1,5 +1,10 @@
 /*
  * Kai Calculator — UI.
+ *
+ * Talks to Supabase only through window.KaiApi (js/api.js). All permission
+ * rules (PIN, 24h lock, admin-only actions) are enforced by the database;
+ * the checks here only decide what to show.
+ *
  * All user-provided text is inserted with textContent (via el()), never innerHTML.
  */
 (function () {
@@ -7,27 +12,51 @@
 
 	const C = window.KaiCalc;
 	const I = window.KaiI18n;
-	const STORAGE_KEY = 'kai-calculator:v1';
+	const API = window.KaiApi;
+	const TOKEN_KEY = 'kai-calculator:token';
+	const LANG_KEY = 'kai-calculator:lang';
 
-	let data = null;
-	let lang = 'en';
-	let storageOk = true;
-	let loadRecovered = false;
-
-	const ui = {
+	const S = {
+		token: null,
+		role: null,
+		today: null,
+		retentionStart: null,
+		settings: null,
+		servers: [],
 		tab: 'entry',
-		entryDate: C.todayIso(),
-		entryType: 'day',
+		entryDate: null,
 		reportKind: 'period',
-		reportDate: C.todayIso(),
+		reportDate: null,
 	};
+	let lang = 'en';
+	let renderSeq = 0;
 
 	/* ------------------------------------------------------------------ */
-	/* Helpers                                                             */
+	/* Small helpers                                                       */
 	/* ------------------------------------------------------------------ */
 
 	function t(key, vars) {
 		return I.t(lang, key, vars);
+	}
+
+	function lsGet(k) {
+		try {
+			return window.localStorage.getItem(k);
+		} catch (e) {
+			return null;
+		}
+	}
+
+	function lsSet(k, v) {
+		try {
+			window.localStorage.setItem(k, v);
+		} catch (e) { /* private mode: works until the tab closes */ }
+	}
+
+	function lsRemove(k) {
+		try {
+			window.localStorage.removeItem(k);
+		} catch (e) { /* ignore */ }
 	}
 
 	function el(tag, props, children) {
@@ -72,10 +101,10 @@
 		return 'ko' === lang ? 'ko-KR' : 'en-US';
 	}
 
-	function money(cents, currency) {
+	function money(cents) {
 		return new Intl.NumberFormat(locale(), {
 			style: 'currency',
-			currency: currency || data.settings.currency,
+			currency: 'USD',
 			currencyDisplay: 'narrowSymbol',
 			minimumFractionDigits: 2,
 			maximumFractionDigits: 2,
@@ -99,25 +128,23 @@
 			.format(new Date(C.toUtcMs(ym + '-01')));
 	}
 
-	function genId(prefix) {
-		return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-	}
-
-	function serverName(id) {
-		const s = data.servers.find(function (x) { return x.id === id; });
-		return s ? s.name : t('unknownServer');
+	/** A timestamp shown in the restaurant's time zone. */
+	function niceTime(ts) {
+		return new Intl.DateTimeFormat(locale(), {
+			weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+			timeZone: S.settings ? S.settings.timezone : undefined,
+		}).format(new Date(ts));
 	}
 
 	function toast(msg, kind) {
 		const box = document.getElementById('toast');
 		const item = el('div', { class: 'toast ' + (kind || 'ok'), role: 'status', text: msg });
-		box.replaceChildren(item); // only the latest message
+		box.replaceChildren(item);
 		setTimeout(function () { item.remove(); }, kind === 'error' ? 6000 : 3000);
 	}
 
 	function download(filename, content, type) {
-		const blob = new Blob([content], { type: type });
-		const url = URL.createObjectURL(blob);
+		const url = URL.createObjectURL(new Blob([content], { type: type }));
 		const a = el('a', { href: url, download: filename });
 		document.body.appendChild(a);
 		a.click();
@@ -136,324 +163,532 @@
 		}));
 	}
 
-	/* ------------------------------------------------------------------ */
-	/* Storage                                                             */
-	/* ------------------------------------------------------------------ */
+	function errMessage(e) {
+		const code = e && e.code ? e.code : 'server';
+		const key = 'err_' + code;
+		const msg = t(key);
+		return msg === key ? t('err_server') : msg;
+	}
 
-	function load() {
-		let raw = null;
-		try {
-			raw = window.localStorage.getItem(STORAGE_KEY);
-		} catch (e) {
-			storageOk = false;
-		}
-		if (!raw) {
-			return C.emptyData();
+	/** Disable a button while an async action runs (prevents double saves). */
+	async function busy(button, fn) {
+		if (button) {
+			button.disabled = true;
 		}
 		try {
-			return C.normalizeData(JSON.parse(raw));
-		} catch (e) {
-			// Keep the damaged copy so nothing is lost, then start clean.
-			try {
-				window.localStorage.setItem(STORAGE_KEY + ':damaged:' + Date.now(), raw);
-			} catch (e2) { /* ignore */ }
-			loadRecovered = true;
-			return C.emptyData();
+			return await fn();
+		} finally {
+			if (button) {
+				button.disabled = false;
+			}
 		}
 	}
 
-	function save() {
-		try {
-			window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+	/** Shows an API error. Returns true if the user had to log in again. */
+	function handleError(e) {
+		if (e && e.code === 'not_authenticated') {
+			clearSession();
+			renderLogin(t('sessionExpired'));
 			return true;
-		} catch (e) {
-			toast(t('saveFailed'), 'error');
-			return false;
 		}
+		toast(errMessage(e), 'error');
+		return false;
+	}
+
+	function isAdmin() {
+		return 'admin' === S.role;
 	}
 
 	/* ------------------------------------------------------------------ */
-	/* Render root                                                         */
+	/* Session                                                             */
 	/* ------------------------------------------------------------------ */
 
-	function render() {
-		const hash = window.location.hash;
-		if (hash.indexOf('#r=') === 0) {
-			renderShareView(hash.slice(3));
+	function clearSession() {
+		S.token = null;
+		S.role = null;
+		lsRemove(TOKEN_KEY);
+	}
+
+	async function refreshBootstrap() {
+		const b = await API.rpc('get_bootstrap', { p_token: S.token });
+		S.role = b.role;
+		S.today = b.today;
+		S.retentionStart = b.retention_start;
+		S.settings = b.settings;
+		S.servers = b.servers || [];
+		if (!S.entryDate) {
+			S.entryDate = S.today;
+		}
+		if (!S.reportDate) {
+			S.reportDate = S.today;
+		}
+	}
+
+	async function boot() {
+		lang = lsGet(LANG_KEY) || I.detect();
+		document.documentElement.lang = lang;
+		if (!API.configured()) {
+			renderSetupNeeded();
 			return;
 		}
-		document.body.classList.remove('is-share');
-		lang = data.settings.lang || I.detect();
-		document.documentElement.lang = lang;
-		document.title = (data.settings.restaurantName ? data.settings.restaurantName + ' · ' : '') + t('appTitle');
-		document.getElementById('app-title').textContent = data.settings.restaurantName || t('appTitle');
-		document.getElementById('app-subtitle').textContent = t('appSubtitle');
+		S.token = lsGet(TOKEN_KEY);
+		if (!S.token) {
+			renderLogin();
+			return;
+		}
+		renderShell();
+		setMain(loadingCard());
+		try {
+			await refreshBootstrap();
+		} catch (e) {
+			if (!handleError(e)) {
+				setMain(errorCard(errMessage(e), boot));
+			}
+			return;
+		}
+		render();
+	}
 
-		const tabs = [
+	/* ------------------------------------------------------------------ */
+	/* Layout                                                              */
+	/* ------------------------------------------------------------------ */
+
+	function setMain(node) {
+		const main = document.getElementById('app');
+		main.replaceChildren(node);
+	}
+
+	function loadingCard() {
+		return el('section', { class: 'card empty muted', 'aria-busy': 'true', text: t('loading') });
+	}
+
+	function errorCard(msg, retry) {
+		return el('section', { class: 'card empty' }, [
+			el('p', { class: 'notice error', text: msg }),
+			retry ? el('button', { type: 'button', class: 'btn', onclick: retry }, t('retry')) : null,
+		]);
+	}
+
+	function renderShell() {
+		const name = S.settings && S.settings.restaurant_name;
+		document.title = (name ? name + ' · ' : '') + t('appTitle');
+		document.getElementById('app-title').textContent = name || t('appTitle');
+		const sub = document.getElementById('app-subtitle');
+		sub.replaceChildren();
+		appendChildren(sub, [
+			S.role ? el('span', { class: 'badge ' + (isAdmin() ? 'admin' : 'on'), text: isAdmin() ? t('roleAdmin') : t('roleStaff') }) : null,
+			' ' + t('appSubtitle'),
+		]);
+		const tabs = document.getElementById('tabs');
+		if (!S.role) {
+			tabs.replaceChildren();
+			return;
+		}
+		tabs.replaceChildren.apply(tabs, [
 			['entry', t('tabEntry')],
 			['report', t('tabReport')],
 			['staff', t('tabStaff')],
 			['settings', t('tabSettings')],
-		];
-		document.getElementById('tabs').replaceChildren.apply(
-			document.getElementById('tabs'),
-			tabs.map(function (tb) {
-				return el('button', {
-					type: 'button',
-					role: 'tab',
-					class: 'tab' + (ui.tab === tb[0] ? ' is-on' : ''),
-					'aria-selected': ui.tab === tb[0] ? 'true' : 'false',
-					onclick: function () { ui.tab = tb[0]; render(); },
-				}, tb[1]);
-			})
-		);
+		].map(function (tb) {
+			return el('button', {
+				type: 'button',
+				role: 'tab',
+				class: 'tab' + (S.tab === tb[0] ? ' is-on' : ''),
+				'aria-selected': S.tab === tb[0] ? 'true' : 'false',
+				onclick: function () {
+					S.tab = tb[0];
+					render();
+				},
+			}, tb[1]);
+		}));
+	}
 
-		const notices = [];
-		if (!storageOk) {
-			notices.push(el('div', { class: 'notice error', text: t('storageUnavailable') }));
-		}
-		if (loadRecovered) {
-			notices.push(el('div', { class: 'notice error', text: t('loadRecovered') }));
-		}
-
-		let body;
-		if ('report' === ui.tab) {
-			body = renderReportTab();
-		} else if ('staff' === ui.tab) {
-			body = renderStaffTab();
-		} else if ('settings' === ui.tab) {
-			body = renderSettingsTab();
+	function render() {
+		renderShell();
+		const seq = ++renderSeq;
+		if ('report' === S.tab) {
+			renderReportTab(seq);
+		} else if ('staff' === S.tab) {
+			setMain(renderStaffTab());
+		} else if ('settings' === S.tab) {
+			setMain(renderSettingsTab());
 		} else {
-			body = renderEntryTab();
+			renderEntryTab(seq);
 		}
-		const main = document.getElementById('app');
-		main.replaceChildren.apply(main, notices.concat([body]));
+	}
+
+	/** Load a date range, then draw with `draw(range)` unless the user moved on. */
+	async function loadRange(seq, from, to, draw) {
+		setMain(loadingCard());
+		let range;
+		try {
+			range = await API.rpc('get_range', { p_token: S.token, p_from: from, p_to: to });
+		} catch (e) {
+			if (seq === renderSeq && !handleError(e)) {
+				setMain(errorCard(errMessage(e), render));
+			}
+			return;
+		}
+		if (seq !== renderSeq) {
+			return; // user switched tabs/dates while loading
+		}
+		S.today = range.today;
+		S.retentionStart = range.retention_start;
+		setMain(draw(range));
+	}
+
+	function calcInput(range) {
+		return {
+			serverPct: S.settings.server_pct,
+			servers: S.servers,
+			days: range.days.map(function (d) {
+				return {
+					date: d.date,
+					dayTips: Number(d.day_tips_cents),
+					totalTips: d.total_tips_cents === null ? null : Number(d.total_tips_cents),
+					editable: d.editable === true,
+					editUntil: d.edit_until,
+				};
+			}),
+			hours: range.hours.map(function (h) {
+				return { date: h.date, serverId: h.server_id, shift: h.shift, hundredths: h.hundredths };
+			}),
+		};
 	}
 
 	/* ------------------------------------------------------------------ */
-	/* Entry tab                                                           */
+	/* Setup / login                                                       */
 	/* ------------------------------------------------------------------ */
 
-	function findShift(date, type) {
-		return data.shifts.find(function (s) { return s.date === date && s.type === type; }) || null;
+	function renderSetupNeeded() {
+		renderShell();
+		setMain(el('section', { class: 'card' }, [
+			el('h2', { text: t('setupTitle') }),
+			el('p', { text: t('setupBody') }),
+		]));
 	}
 
-	function renderEntryTab() {
-		if (!data.servers.length) {
-			return el('section', { class: 'card empty' }, [
-				el('p', { text: t('noServersYet') }),
-				el('button', { type: 'button', class: 'btn primary', onclick: function () { ui.tab = 'staff'; render(); } }, t('goToServers')),
+	function renderLogin(message) {
+		S.role = null;
+		renderShell();
+		const input = el('input', {
+			type: 'password',
+			id: 'password',
+			autocomplete: 'current-password',
+			required: true,
+			maxlength: 200,
+			'aria-label': t('password'),
+		});
+		const btn = el('button', { type: 'submit', class: 'btn primary block' }, t('login'));
+		const note = el('p', { class: message ? 'notice warn' : 'muted small', text: message || t('loginHelp') });
+
+		async function onSubmit(ev) {
+			ev.preventDefault();
+			if (!input.value) {
+				input.focus();
+				return;
+			}
+			await busy(btn, async function () {
+				let r;
+				try {
+					r = await API.rpc('login', { p_password: input.value });
+				} catch (e) {
+					note.className = 'notice error';
+					note.textContent = errMessage(e);
+					return;
+				}
+				if (!r || !r.ok) {
+					note.className = 'notice error';
+					note.textContent = t('login_' + (r && r.error ? r.error : 'bad_password'));
+					input.select();
+					return;
+				}
+				S.token = r.token;
+				lsSet(TOKEN_KEY, r.token);
+				input.value = '';
+				S.tab = 'entry';
+				S.entryDate = null;
+				S.reportDate = null;
+				boot();
+			});
+		}
+
+		setMain(el('form', { class: 'card login', onsubmit: onSubmit }, [
+			el('h2', { text: t('loginTitle') }),
+			note,
+			el('label', { class: 'field' }, [el('span', { text: t('password') }), input]),
+			btn,
+		]));
+		setTimeout(function () { input.focus(); }, 0);
+	}
+
+	/* ------------------------------------------------------------------ */
+	/* Entry tab — one date: day tips, whole-day total, everyone's hours   */
+	/* ------------------------------------------------------------------ */
+
+	/** Why the selected date can't be edited (null = editable). */
+	function lockReason(date, rec) {
+		if (date > S.today) {
+			return t('lockFuture');
+		}
+		if (S.retentionStart && date < S.retentionStart) {
+			return t('lockTooOld');
+		}
+		if (rec) {
+			return rec.editable ? null : t('lockAdminOnly', { hours: S.settings.edit_window_hours });
+		}
+		if (isAdmin() || date >= C.addDays(S.today, -1)) {
+			return null;
+		}
+		return t('lockStaffOldDate');
+	}
+
+	function renderEntryTab(seq) {
+		const date = S.entryDate;
+		const p = C.periodFor(S.settings.period_anchor, date);
+		loadRange(seq, p.from, p.to, function (range) {
+			const input = calcInput(range);
+			const rec = input.days.find(function (d) { return d.date === date; }) || null;
+			return el('div', { class: 'stack' }, [
+				renderDayForm(date, rec, input),
+				renderPeriodList(p, input),
 			]);
+		});
+	}
+
+	function renderDayForm(date, rec, input) {
+		const locked = lockReason(date, rec);
+		const pct = S.settings.server_pct;
+		const myHours = input.hours.filter(function (h) { return h.date === date; });
+		function savedHours(serverId, shift) {
+			const h = myHours.find(function (x) { return x.serverId === serverId && x.shift === shift; });
+			return h ? C.formatHours(h.hundredths) : '';
 		}
-
-		const existing = findShift(ui.entryDate, ui.entryType);
-		const servers = data.servers.filter(function (s) {
-			return s.active || (existing && existing.hours[s.id]);
+		const servers = S.servers.filter(function (s) {
+			return s.active || myHours.some(function (h) { return h.serverId === s.id; });
 		});
 
-		const tipsInput = el('input', {
-			id: 'tips',
-			type: 'text',
-			inputmode: 'decimal',
-			autocomplete: 'off',
-			placeholder: '0.00',
-			value: existing ? C.centsToPlain(existing.tipsCents) : '',
-			oninput: updatePreview,
+		const dayTipsInput = el('input', {
+			id: 'day-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0.00',
+			value: rec ? C.centsToPlain(rec.dayTips) : '', disabled: !!locked, oninput: update,
 		});
+		const totalInput = el('input', {
+			id: 'total-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: t('totalPlaceholder'),
+			value: rec && rec.totalTips !== null ? C.centsToPlain(rec.totalTips) : '', disabled: !!locked, oninput: update,
+		});
+		const nightOut = el('output', { id: 'night-tips', class: 'computed' }, '—');
+		const splitOut = el('p', { class: 'split-line' });
 
-		const hourInputs = {};
+		const inputs = {};
 		const shareCells = {};
 		const rows = servers.map(function (s) {
-			hourInputs[s.id] = el('input', {
-				type: 'text',
-				inputmode: 'decimal',
-				autocomplete: 'off',
-				placeholder: '0',
-				'aria-label': s.name + ' ' + t('hours'),
-				value: existing && existing.hours[s.id] ? C.formatHours(existing.hours[s.id]) : '',
-				oninput: updatePreview,
+			inputs[s.id] = {};
+			C.SHIFTS.forEach(function (shift) {
+				inputs[s.id][shift] = el('input', {
+					type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0',
+					'aria-label': s.name + ' ' + t(shift) + ' ' + t('hours'),
+					value: savedHours(s.id, shift), disabled: !!locked, oninput: update,
+				});
 			});
 			shareCells[s.id] = el('td', { class: 'num share' }, '—');
 			return el('tr', null, [
-				el('td', null, [s.name, s.active ? null : el('span', { class: 'tag', text: t('inactiveTag') })]),
-				el('td', { class: 'hours-cell' }, hourInputs[s.id]),
+				el('td', { class: 'name' }, [s.name, s.active ? null : el('span', { class: 'tag', text: t('inactiveTag') })]),
+				el('td', { class: 'hours-cell' }, inputs[s.id].day),
+				el('td', { class: 'hours-cell' }, inputs[s.id].night),
 				shareCells[s.id],
 			]);
 		});
-		const totalHoursCell = el('td', { class: 'num' }, '0');
-		const totalShareCell = el('td', { class: 'num' }, '—');
+		const foot = { day: el('th', { class: 'num' }, '0'), night: el('th', { class: 'num' }, '0'), share: el('th', { class: 'num' }, '—') };
 
 		function readForm() {
-			const tipsRaw = tipsInput.value.trim();
-			const tips = tipsRaw === '' ? 0 : C.parseMoney(tipsRaw);
-			const hours = {};
-			const bad = [];
+			const out = { bad: [], hours: [], byShift: { day: [], night: [] } };
+			const dayRaw = dayTipsInput.value.trim();
+			const totalRaw = totalInput.value.trim();
+			out.dayTips = dayRaw === '' ? null : C.parseMoney(dayRaw);
+			out.dayTipsInvalid = dayRaw !== '' && out.dayTips === null;
+			out.totalTips = totalRaw === '' ? null : C.parseMoney(totalRaw);
+			out.totalInvalid = totalRaw !== '' && (out.totalTips === null || (out.dayTips !== null && out.totalTips < out.dayTips));
+			dayTipsInput.classList.toggle('invalid', out.dayTipsInvalid);
+			totalInput.classList.toggle('invalid', out.totalInvalid);
 			servers.forEach(function (s) {
-				const raw = hourInputs[s.id].value.trim();
-				if (raw === '') {
-					hourInputs[s.id].classList.remove('invalid');
-					return;
-				}
-				const h = C.parseHours(raw);
-				hourInputs[s.id].classList.toggle('invalid', h === null);
-				if (h === null) {
-					bad.push(s.name);
-				} else if (h > 0) {
-					hours[s.id] = h;
-				}
+				C.SHIFTS.forEach(function (shift) {
+					const field = inputs[s.id][shift];
+					const raw = field.value.trim();
+					const v = raw === '' ? 0 : C.parseHours(raw);
+					field.classList.toggle('invalid', v === null);
+					if (v === null) {
+						if (out.bad.indexOf(s.name) < 0) {
+							out.bad.push(s.name);
+						}
+					} else if (v > 0) {
+						out.hours.push({ server_id: s.id, shift: shift, hundredths: v });
+						out.byShift[shift].push({ key: s.id, weight: v });
+					}
+				});
 			});
-			tipsInput.classList.toggle('invalid', tips === null);
-			return { tips: tips, hours: hours, bad: bad };
+			return out;
 		}
 
-		function updatePreview() {
+		function update() {
 			const f = readForm();
-			const entries = servers.filter(function (s) { return f.hours[s.id]; })
-				.map(function (s) { return { key: s.id, weight: f.hours[s.id] }; });
-			const split = f.tips ? C.splitByWeight(f.tips, entries) : {};
-			let totalH = 0;
+			const dayTips = f.dayTips || 0;
+			const night = !f.totalInvalid && f.totalTips !== null ? f.totalTips - dayTips : null;
+			nightOut.textContent = night === null || night < 0 ? '—' : money(night);
+			const d = C.splitShift(dayTips, pct, f.byShift.day);
+			const n = C.splitShift(night && night > 0 ? night : 0, pct, f.byShift.night);
 			servers.forEach(function (s) {
-				totalH += f.hours[s.id] || 0;
-				shareCells[s.id].textContent = split[s.id] !== undefined ? money(split[s.id]) : '—';
+				const a = d.shares[s.id] || 0;
+				const b = n.shares[s.id] || 0;
+				shareCells[s.id].replaceChildren();
+				appendChildren(shareCells[s.id], [
+					a + b ? el('strong', { text: money(a + b) }) : '—',
+					a && b ? el('small', { class: 'muted block', text: t('day') + ' ' + money(a) + ' · ' + t('night') + ' ' + money(b) }) : null,
+				]);
 			});
-			totalHoursCell.textContent = C.formatHours(totalH);
-			totalShareCell.textContent = f.tips && entries.length ? money(f.tips) : '—';
+			foot.day.textContent = C.formatHours(f.byShift.day.reduce(function (x, e) { return x + e.weight; }, 0));
+			foot.night.textContent = C.formatHours(f.byShift.night.reduce(function (x, e) { return x + e.weight; }, 0));
+			foot.share.textContent = money(d.pool + n.pool);
+			splitOut.textContent = t('splitLine', {
+				pct: pct, kpct: 100 - pct, servers: money(d.pool + n.pool), kitchen: money(d.kitchen + n.kitchen),
+			});
 		}
 
-		function onSave(ev) {
+		async function onSave(ev) {
 			ev.preventDefault();
 			const f = readForm();
-			if (f.tips === null) {
-				toast(t('errBadTips'), 'error');
-				tipsInput.focus();
+			if (f.dayTips === null || f.dayTipsInvalid) {
+				toast(t('errDayTips'), 'error');
+				dayTipsInput.focus();
+				return;
+			}
+			if (f.totalInvalid) {
+				toast(t('errTotalTips'), 'error');
+				totalInput.focus();
 				return;
 			}
 			if (f.bad.length) {
 				toast(t('errBadHours', { names: f.bad.join(', ') }), 'error');
 				return;
 			}
-			const anyHours = Object.keys(f.hours).length > 0;
-			if (f.tips > 0 && !anyHours) {
-				toast(t('errTipsNoHours'), 'error');
+			if (f.dayTips > 0 && !f.byShift.day.length) {
+				toast(t('errDayNoHours'), 'error');
 				return;
 			}
-			if (!f.tips && !anyHours) {
-				toast(t('errNothing'), 'error');
+			if (f.totalTips !== null && f.totalTips - f.dayTips > 0 && !f.byShift.night.length) {
+				toast(t('errNightNoHours'), 'error');
 				return;
 			}
-			const record = {
-				id: existing ? existing.id : genId('sh_'),
-				date: ui.entryDate,
-				type: ui.entryType,
-				tipsCents: f.tips,
-				hours: f.hours,
-			};
-			data.shifts = data.shifts.filter(function (s) { return !(s.date === record.date && s.type === record.type); });
-			data.shifts.push(record);
-			data.shifts.sort(function (a, b) { return (a.date + a.type).localeCompare(b.date + b.type); });
-			if (save()) {
+			await busy(saveBtn, async function () {
+				try {
+					await API.rpc('save_day', {
+						p_token: S.token,
+						p_date: date,
+						p_day_tips_cents: f.dayTips,
+						p_total_tips_cents: f.totalTips,
+						p_hours: f.hours,
+					});
+				} catch (e) {
+					handleError(e);
+					return;
+				}
 				toast(t('saved'));
 				render();
-			}
+			});
 		}
 
-		function onDelete() {
-			deleteShift(existing);
+		async function onDelete() {
+			if (!window.confirm(t('confirmDeleteDay', { date: niceDate(date, true) }))) {
+				return;
+			}
+			try {
+				await API.rpc('delete_day', { p_token: S.token, p_date: date });
+			} catch (e) {
+				handleError(e);
+				return;
+			}
+			toast(t('deleted'));
+			render();
+		}
+
+		const saveBtn = el('button', { type: 'submit', class: 'btn primary' }, t('save'));
+
+		let status;
+		if (locked) {
+			status = el('p', { class: 'notice lock', text: '🔒 ' + locked });
+		} else if (rec && rec.editUntil) {
+			status = el('p', { class: 'status editing', text: t('editableUntil', { time: niceTime(rec.editUntil) }) });
+		} else {
+			status = el('p', { class: 'status', text: rec ? t('editingExisting') : t('newRecord') });
 		}
 
 		const form = el('form', { class: 'card', onsubmit: onSave, novalidate: true }, [
-			el('h2', { text: t('entryTitle') }),
-			el('p', { class: 'muted', text: t('entryHelp') }),
-			el('div', { class: 'row wrap' }, [
-				el('label', { class: 'field' }, [
-					el('span', { text: t('date') }),
+			el('div', { class: 'row between' }, [
+				el('h2', { text: t('entryTitle') }),
+				el('div', { class: 'row date-nav' }, [
+					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('prevDay'), onclick: function () { S.entryDate = C.addDays(date, -1); render(); } }, '‹'),
 					el('input', {
-						type: 'date',
-						value: ui.entryDate,
-						required: true,
+						type: 'date', class: 'date-input', value: date, max: S.today, required: true, 'aria-label': t('date'),
 						onchange: function (e) {
 							if (C.isIsoDate(e.target.value)) {
-								ui.entryDate = e.target.value;
+								S.entryDate = e.target.value;
 								render();
 							}
 						},
 					}),
+					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('nextDay'), disabled: date >= S.today, onclick: function () { S.entryDate = C.addDays(date, 1); render(); } }, '›'),
+					date !== S.today ? el('button', { type: 'button', class: 'btn small', onclick: function () { S.entryDate = S.today; render(); } }, t('today')) : null,
 				]),
-				el('div', { class: 'field' }, [
-					el('span', { text: t('shift') }),
-					segmented([{ value: 'day', label: '☀ ' + t('day') }, { value: 'night', label: '☾ ' + t('night') }], ui.entryType, function (v) {
-						ui.entryType = v;
-						render();
-					}),
-				]),
-				el('label', { class: 'field grow' }, [el('span', { text: t('shiftTips') }), tipsInput]),
 			]),
-			el('p', { class: 'status ' + (existing ? 'editing' : ''), text: existing ? t('editingExisting') : t('newRecord') }),
-			el('div', { class: 'table-wrap' }, el('table', { class: 'grid entry-grid' }, [
+			status,
+			el('div', { class: 'tips-grid' }, [
+				el('label', { class: 'field' }, [el('span', { text: '☀ ' + t('dayTips') }), dayTipsInput]),
+				el('label', { class: 'field' }, [el('span', { text: t('totalTips') }), totalInput]),
+				el('div', { class: 'field' }, [el('span', { text: '☾ ' + t('nightTipsAuto') }), nightOut]),
+			]),
+			rec && rec.totalTips === null && !locked ? el('p', { class: 'notice warn', text: t('totalMissingHint') }) : null,
+			splitOut,
+			servers.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid entry-grid' }, [
 				el('thead', null, el('tr', null, [
 					el('th', { text: t('server') }),
-					el('th', { text: t('hours') }),
+					el('th', { text: '☀ ' + t('hours') }),
+					el('th', { text: '☾ ' + t('hours') }),
 					el('th', { class: 'num', text: t('share') }),
 				])),
 				el('tbody', null, rows),
-				el('tfoot', null, el('tr', null, [el('th', { text: t('total') }), totalHoursCell, totalShareCell])),
-			])),
+				el('tfoot', null, el('tr', null, [el('th', { text: t('total') }), foot.day, foot.night, foot.share])),
+			])) : el('p', { class: 'notice warn' }, [
+				t('noServersYet') + ' ',
+				el('button', { type: 'button', class: 'btn small', onclick: function () { S.tab = 'staff'; render(); } }, t('goToServers')),
+			]),
 			el('p', { class: 'muted small', text: t('hoursHelp') }),
-			el('div', { class: 'row actions' }, [
-				el('button', { type: 'submit', class: 'btn primary' }, t('save')),
-				existing ? el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')) : null,
+			locked ? null : el('div', { class: 'row actions' }, [
+				saveBtn,
+				rec ? el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')) : null,
 			]),
 		]);
-
-		updatePreview();
-		return el('div', { class: 'stack' }, [form, renderPeriodList()]);
+		update();
+		return form;
 	}
 
-	function deleteShift(shift) {
-		if (!shift) {
-			return;
-		}
-		const typeLabel = t(shift.type);
-		if (!window.confirm(t('confirmDeleteShift', { date: niceDate(shift.date, true), type: typeLabel }))) {
-			return;
-		}
-		data.shifts = data.shifts.filter(function (s) { return !(s.date === shift.date && s.type === shift.type); });
-		if (save()) {
-			toast(t('deleted'));
-			render();
-		}
-	}
+	function renderPeriodList(p, input) {
+		const s = C.summarize(input, p.from, p.to);
+		const recs = {};
+		input.days.forEach(function (d) { recs[d.date] = d; });
 
-	function renderPeriodList() {
-		const p = C.periodFor(data.settings.periodAnchor, ui.entryDate);
-		const shifts = data.shifts.filter(function (s) { return s.date >= p.from && s.date <= p.to; });
-		let totalTips = 0;
-		let totalHours = 0;
-
-		const body = shifts.map(function (s) {
-			const h = Object.keys(s.hours).reduce(function (a, id) { return a + s.hours[id]; }, 0);
-			totalTips += s.tipsCents;
-			totalHours += h;
-			const isCurrent = s.date === ui.entryDate && s.type === ui.entryType;
-			return el('tr', { class: isCurrent ? 'is-current' : '' }, [
-				el('td', { text: niceDate(s.date, true) }),
-				el('td', null, el('span', { class: 'badge ' + s.type, text: t(s.type) })),
-				el('td', { class: 'num', text: money(s.tipsCents) }),
-				el('td', { class: 'num', text: C.formatHours(h) }),
-				el('td', { class: 'num muted', text: t('serversCount', { n: Object.keys(s.hours).length }) }),
-				el('td', { class: 'num nowrap' }, [
-					el('button', {
-						type: 'button',
-						class: 'btn small ghost',
-						onclick: function () {
-							ui.entryDate = s.date;
-							ui.entryType = s.type;
-							render();
-							window.scrollTo({ top: 0, behavior: 'smooth' });
-						},
-					}, t('edit')),
-					el('button', { type: 'button', class: 'btn small ghost danger', onclick: function () { deleteShift(s); } }, t('delete')),
-				]),
+		const body = s.days.map(function (d) {
+			const rec = recs[d.date];
+			return el('tr', {
+				class: 'clickable' + (d.date === S.entryDate ? ' is-current' : ''),
+				tabindex: '0',
+				onclick: function () { S.entryDate = d.date; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); },
+				onkeydown: function (e) { if (e.key === 'Enter') { S.entryDate = d.date; render(); } },
+			}, [
+				el('td', { class: 'nowrap', text: niceDate(d.date, true) }),
+				el('td', { class: 'num', text: money(d.dayTips) }),
+				el('td', { class: 'num', text: d.totalTips === null ? '—' : money(d.nightTips) }),
+				el('td', { class: 'num strong', text: d.totalTips === null ? t('missing') : money(d.totalTips) }),
+				el('td', { class: 'num', text: money(d.pool) }),
+				el('td', { class: 'num', text: rec && rec.editable ? '' : '🔒' }),
 			]);
 		});
 
@@ -462,22 +697,22 @@
 				el('h2', { text: t('periodListTitle') }),
 				el('span', { class: 'muted', text: rangeLabel(p.from, p.to) }),
 			]),
-			shifts.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid' }, [
+			s.days.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid' }, [
 				el('thead', null, el('tr', null, [
 					el('th', { text: t('date') }),
-					el('th', { text: t('shift') }),
-					el('th', { class: 'num', text: t('tips') }),
-					el('th', { class: 'num', text: t('hours') }),
-					el('th', null, ''),
+					el('th', { class: 'num', text: t('colDayTips') }),
+					el('th', { class: 'num', text: t('colNightTips') }),
+					el('th', { class: 'num', text: t('colTotalTips') }),
+					el('th', { class: 'num', text: t('colServerPool', { pct: S.settings.server_pct }) }),
 					el('th', null, ''),
 				])),
 				el('tbody', null, body),
 				el('tfoot', null, el('tr', null, [
 					el('th', { text: t('total') }),
-					el('th', null, ''),
-					el('th', { class: 'num', text: money(totalTips) }),
-					el('th', { class: 'num', text: C.formatHours(totalHours) }),
-					el('th', null, ''),
+					el('th', { class: 'num', text: money(s.totals.dayTips) }),
+					el('th', { class: 'num', text: money(s.totals.nightTips) }),
+					el('th', { class: 'num', text: money(s.totals.tips) }),
+					el('th', { class: 'num', text: money(s.totals.pool) }),
 					el('th', null, ''),
 				])),
 			])) : el('p', { class: 'muted', text: t('noShifts') }),
@@ -488,152 +723,100 @@
 	/* Report tab                                                          */
 	/* ------------------------------------------------------------------ */
 
-	function currentReportRange() {
-		if ('month' === ui.reportKind) {
-			return C.monthRange(C.monthKey(ui.reportDate));
+	function reportRange() {
+		if ('month' === S.reportKind) {
+			return C.monthRange(C.monthKey(S.reportDate));
 		}
-		return C.periodFor(data.settings.periodAnchor, ui.reportDate);
+		return C.periodFor(S.settings.period_anchor, S.reportDate);
 	}
 
-	function buildView() {
-		const r = currentReportRange();
-		const s = C.summarize(data, r.from, r.to);
-		const view = {
-			title: data.settings.restaurantName,
-			currency: data.settings.currency,
-			lang: lang,
-			kind: ui.reportKind,
-			mode: data.settings.splitMode,
-			from: r.from,
-			to: r.to,
-			generatedAt: new Date().toISOString(),
-			rows: s.rows.map(function (row) {
-				return Object.assign({}, row, { name: row.name || t('unknownServer') });
-			}),
-			totals: s.totals,
-			unallocatedCents: s.unallocatedCents,
-			sections: [],
-		};
-		if ('month' === ui.reportKind) {
-			view.sections = C.periodsInRange(data.settings.periodAnchor, r.from, r.to).map(function (p) {
-				const ps = C.summarize(data, p.from, p.to);
-				return {
-					from: p.from,
-					to: p.to,
-					fullFrom: p.fullFrom,
-					fullTo: p.fullTo,
-					partial: p.partial,
-					rows: ps.rows.map(function (row) { return Object.assign({}, row, { name: row.name || t('unknownServer') }); }),
-					totals: ps.totals,
-					unallocatedCents: ps.unallocatedCents,
-				};
-			});
-		}
-		return view;
-	}
+	function renderReportTab(seq) {
+		const r = reportRange();
+		const isMonth = 'month' === S.reportKind;
+		loadRange(seq, r.from, r.to, function (range) {
+			const s = C.summarize(calcInput(range), r.from, r.to);
 
-	function renderReportTab() {
-		const view = buildView();
-		const isMonth = 'month' === ui.reportKind;
-
-		function move(n) {
-			if (isMonth) {
-				ui.reportDate = C.shiftMonth(C.monthKey(ui.reportDate), n) + '-01';
-			} else {
-				ui.reportDate = C.addDays(view.from, n * C.PERIOD_DAYS);
-			}
-			render();
-		}
-
-		const controls = el('div', { class: 'card controls no-print' }, [
-			segmented([{ value: 'period', label: t('reportPeriod') }, { value: 'month', label: t('reportMonth') }], ui.reportKind, function (v) {
-				ui.reportKind = v;
+			function move(n) {
+				S.reportDate = isMonth ? C.shiftMonth(C.monthKey(S.reportDate), n) + '-01' : C.addDays(r.from, n * C.PERIOD_DAYS);
 				render();
-			}),
-			el('div', { class: 'row nav' }, [
-				el('button', { type: 'button', class: 'btn ghost', 'aria-label': t('prev'), onclick: function () { move(-1); } }, '‹'),
-				el('strong', { text: isMonth ? monthLabel(C.monthKey(view.from)) : rangeLabel(view.from, view.to) }),
-				el('button', { type: 'button', class: 'btn ghost', 'aria-label': t('next'), onclick: function () { move(1); } }, '›'),
-			]),
-			el('div', { class: 'row wrap' }, [
-				el('button', { type: 'button', class: 'btn primary', onclick: function () { copyShareLink(view); } }, t('shareLink')),
-				el('button', { type: 'button', class: 'btn', onclick: function () { downloadCsv(view); } }, t('downloadCsv')),
-				el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
-			]),
-		]);
+			}
 
-		return el('div', { class: 'stack' }, [controls, renderReportBody(view)]);
+			const controls = el('div', { class: 'card controls no-print' }, [
+				segmented([{ value: 'period', label: t('reportPeriod') }, { value: 'month', label: t('reportMonth') }], S.reportKind, function (v) {
+					S.reportKind = v;
+					render();
+				}),
+				el('div', { class: 'row nav' }, [
+					el('button', { type: 'button', class: 'btn ghost', 'aria-label': t('prev'), onclick: function () { move(-1); } }, '‹'),
+					el('strong', { text: isMonth ? monthLabel(C.monthKey(r.from)) : rangeLabel(r.from, r.to) }),
+					el('button', { type: 'button', class: 'btn ghost', 'aria-label': t('next'), disabled: r.to >= S.today, onclick: function () { move(1); } }, '›'),
+				]),
+				el('div', { class: 'row wrap' }, [
+					el('button', { type: 'button', class: 'btn', onclick: function () { downloadCsv(s); } }, t('downloadCsv')),
+					el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
+				]),
+			]);
+			return el('div', { class: 'stack' }, [controls, renderReportBody(s, isMonth)]);
+		});
 	}
 
-	/** Shared by the Reports tab and the read-only share view. */
-	function renderReportBody(view) {
-		const heading = 'month' === view.kind ? monthLabel(view.from.slice(0, 7)) : rangeLabel(view.from, view.to);
-		const tot = view.totals;
-
+	function renderReportBody(s, isMonth) {
+		const tot = s.totals;
 		const parts = [
 			el('header', { class: 'report-head' }, [
-				view.title ? el('p', { class: 'eyebrow', text: view.title }) : null,
-				el('h2', { text: heading }),
-				'month' === view.kind ? el('p', { class: 'muted', text: rangeLabel(view.from, view.to) }) : null,
-				el('p', { class: 'muted small', text: t('perShift' === view.mode ? 'modePerShiftNote' : 'modePooledNote') }),
+				S.settings.restaurant_name ? el('p', { class: 'eyebrow', text: S.settings.restaurant_name }) : null,
+				el('h2', { text: isMonth ? monthLabel(s.from.slice(0, 7)) : rangeLabel(s.from, s.to) }),
+				isMonth ? el('p', { class: 'muted', text: rangeLabel(s.from, s.to) }) : null,
+				el('p', { class: 'muted small', text: t('ruleNote', { pct: s.serverPct, kpct: 100 - s.serverPct }) }),
 			]),
 			el('div', { class: 'cards' }, [
-				statCard(t('cardTotalTips'), money(tot.tips, view.currency), 'accent'),
-				statCard(t('cardDayTips'), money(tot.dayTips, view.currency), 'day'),
-				statCard(t('cardNightTips'), money(tot.nightTips, view.currency), 'night'),
-				statCard(t('cardHours'), C.formatHours(tot.hours)),
+				statCard(t('cardTotalTips'), money(tot.tips), ''),
+				statCard(t('cardServers', { pct: s.serverPct }), money(tot.pool), 'accent'),
+				statCard(t('cardKitchen', { pct: 100 - s.serverPct }), money(tot.kitchen), ''),
+				statCard(t('cardHours'), C.formatHours(tot.hours), ''),
 			]),
 		];
 
-		if (view.unallocatedCents > 0) {
-			parts.push(el('div', { class: 'notice warn', text: t('unallocatedWarn', { amount: money(view.unallocatedCents, view.currency) }) }));
+		if (S.retentionStart && s.from < S.retentionStart) {
+			parts.push(el('div', { class: 'notice warn', text: t('retentionNote', { months: S.settings.retention_months, date: niceDate(S.retentionStart) }) }));
 		}
-		parts.push(view.rows.length ? reportTable(view.rows, tot, view.currency) : el('p', { class: 'muted', text: t('noData') }));
+		s.warnings.forEach(function (w) {
+			parts.push(el('div', {
+				class: 'notice warn',
+				text: 'missingTotal' === w.type
+					? t('warnMissingTotal', { date: niceDate(w.date, true) })
+					: t('warnNoHours', { date: niceDate(w.date, true), shift: t(w.shift), amount: money(w.cents) }),
+			}));
+		});
 
-		if (view.sections && view.sections.length > 1) {
-			parts.push(el('h3', { class: 'section-title', text: t('breakdownTitle') }));
-			view.sections.forEach(function (s) {
-				parts.push(el('div', { class: 'sub-report' }, [
-					el('div', { class: 'row between' }, [
-						el('h4', { text: rangeLabel(s.from, s.to) }),
-						el('span', { class: 'muted', text: money(s.totals.tips, view.currency) }),
-					]),
-					s.partial && s.fullFrom ? el('p', { class: 'muted small', text: t('partialPeriod', { from: niceDate(s.fullFrom), to: niceDate(s.fullTo) }) }) : null,
-					s.unallocatedCents > 0 ? el('div', { class: 'notice warn', text: t('unallocatedWarn', { amount: money(s.unallocatedCents, view.currency) }) }) : null,
-					s.rows.length ? reportTable(s.rows, s.totals, view.currency) : el('p', { class: 'muted', text: t('noData') }),
-				]));
-			});
-		}
+		parts.push(el('h3', { class: 'section-title', text: t('perPersonTitle') }));
+		parts.push(s.rows.length ? personTable(s.rows, tot) : el('p', { class: 'muted', text: t('noData') }));
 
-		if (view.generatedAt) {
-			const d = new Date(view.generatedAt);
-			if (!isNaN(d.getTime())) {
-				parts.push(el('p', { class: 'muted small generated', text: t('generatedAt', {
-					date: new Intl.DateTimeFormat(locale(), { dateStyle: 'medium', timeStyle: 'short' }).format(d),
-				}) }));
-			}
+		if (s.days.length) {
+			parts.push(el('h3', { class: 'section-title', text: t('perDayTitle') }));
+			parts.push(dayTable(s));
 		}
 		return el('section', { class: 'card report' }, parts);
 	}
 
 	function statCard(label, value, kind) {
-		return el('div', { class: 'stat ' + (kind || '') }, [
+		return el('div', { class: 'stat ' + kind }, [
 			el('span', { class: 'stat-label', text: label }),
 			el('span', { class: 'stat-value', text: value }),
 		]);
 	}
 
-	function reportTable(rows, tot, currency) {
+	function personTable(rows, tot) {
 		function cells(r, tag) {
 			// Most important first so it is visible on phones without scrolling.
 			return [
-				el(tag, { class: 'num strong', text: money(r.tips, currency) }),
+				el(tag, { class: 'num strong', text: money(r.tips) }),
 				el(tag, { class: 'num', text: C.formatHours(r.hours) }),
-				el(tag, { class: 'num muted', text: money(r.perHourCents, currency) }),
+				el(tag, { class: 'num muted', text: money(r.perHourCents) }),
 				el(tag, { class: 'num day-col', text: C.formatHours(r.dayHours) }),
-				el(tag, { class: 'num day-col', text: money(r.dayTips, currency) }),
+				el(tag, { class: 'num day-col', text: money(r.dayTips) }),
 				el(tag, { class: 'num night-col', text: C.formatHours(r.nightHours) }),
-				el(tag, { class: 'num night-col', text: money(r.nightTips, currency) }),
+				el(tag, { class: 'num night-col', text: money(r.nightTips) }),
 			];
 		}
 		return el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
@@ -650,25 +833,40 @@
 			el('tbody', null, rows.map(function (r) {
 				return el('tr', null, [el('td', { class: 'name', text: r.name || t('unknownServer') })].concat(cells(r, 'td')));
 			})),
-			el('tfoot', null, el('tr', null, [el('th', { text: t('total') })].concat(cells(tot, 'th')))),
+			el('tfoot', null, el('tr', null, [el('th', { text: t('total') })].concat(cells({
+				tips: tot.serverTips, hours: tot.hours, perHourCents: tot.perHourCents,
+				dayHours: tot.dayHours, nightHours: tot.nightHours,
+				dayTips: rows.reduce(function (a, r) { return a + r.dayTips; }, 0),
+				nightTips: rows.reduce(function (a, r) { return a + r.nightTips; }, 0),
+			}, 'th')))),
 		]));
 	}
 
-	function shareUrl(view) {
-		const base = window.location.href.split('#')[0];
-		return base + '#r=' + C.encodeShare(C.buildSharePayload(view));
-	}
-
-	function copyShareLink(view) {
-		const url = shareUrl(view);
-		function fallback() {
-			window.prompt(t('copyManually'), url);
-		}
-		if (navigator.clipboard && window.isSecureContext) {
-			navigator.clipboard.writeText(url).then(function () { toast(t('linkCopied')); }, fallback);
-		} else {
-			fallback();
-		}
+	function dayTable(s) {
+		return el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
+			el('thead', null, el('tr', null, [
+				el('th', { text: t('date') }),
+				el('th', { class: 'num', text: t('colTotalTips') }),
+				el('th', { class: 'num day-col', text: t('colDayTips') }),
+				el('th', { class: 'num night-col', text: t('colNightTips') }),
+				el('th', { class: 'num', text: t('colServerPool', { pct: s.serverPct }) }),
+				el('th', { class: 'num', text: t('colKitchen', { pct: 100 - s.serverPct }) }),
+				el('th', { class: 'num day-col', text: t('colDayHours') }),
+				el('th', { class: 'num night-col', text: t('colNightHours') }),
+			])),
+			el('tbody', null, s.days.map(function (d) {
+				return el('tr', null, [
+					el('td', { class: 'name', text: niceDate(d.date, true) }),
+					el('td', { class: 'num strong', text: d.totalTips === null ? t('missing') : money(d.totalTips) }),
+					el('td', { class: 'num day-col', text: money(d.dayTips) }),
+					el('td', { class: 'num night-col', text: d.totalTips === null ? '—' : money(d.nightTips) }),
+					el('td', { class: 'num', text: money(d.pool) }),
+					el('td', { class: 'num', text: money(d.kitchen) }),
+					el('td', { class: 'num day-col', text: C.formatHours(d.dayHours) }),
+					el('td', { class: 'num night-col', text: C.formatHours(d.nightHours) }),
+				]);
+			})),
+		]));
 	}
 
 	function csvCell(v) {
@@ -679,101 +877,60 @@
 		return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 	}
 
-	function downloadCsv(view) {
-		const head = [t('server'), t('colTips'), t('colHours'), t('colPerHour'), t('colDayHours'), t('colDayTips'), t('colNightHours'), t('colNightTips')];
-		function cols(r) {
-			return [C.centsToPlain(r.tips), C.formatHours(r.hours), C.centsToPlain(r.perHourCents),
-				C.formatHours(r.dayHours), C.centsToPlain(r.dayTips), C.formatHours(r.nightHours), C.centsToPlain(r.nightTips)];
-		}
+	function downloadCsv(s) {
 		const lines = [];
-		function block(title, rows, tot) {
-			lines.push([title]);
-			lines.push(head);
-			rows.forEach(function (r) {
-				lines.push([r.name].concat(cols(r)));
-			});
-			lines.push([t('total')].concat(cols(tot)));
-			lines.push([]);
-		}
-		block(view.from + ' ~ ' + view.to, view.rows, view.totals);
-		if (view.sections.length > 1) {
-			view.sections.forEach(function (s) { block(s.from + ' ~ ' + s.to, s.rows, s.totals); });
-		}
+		lines.push([s.from + ' ~ ' + s.to]);
+		lines.push([t('server'), t('colTips'), t('colHours'), t('colPerHour'), t('colDayHours'), t('colDayTips'), t('colNightHours'), t('colNightTips')]);
+		s.rows.forEach(function (r) {
+			lines.push([r.name || t('unknownServer'), C.centsToPlain(r.tips), C.formatHours(r.hours), C.centsToPlain(r.perHourCents),
+				C.formatHours(r.dayHours), C.centsToPlain(r.dayTips), C.formatHours(r.nightHours), C.centsToPlain(r.nightTips)]);
+		});
+		lines.push([t('total'), C.centsToPlain(s.totals.serverTips), C.formatHours(s.totals.hours), C.centsToPlain(s.totals.perHourCents),
+			C.formatHours(s.totals.dayHours), '', C.formatHours(s.totals.nightHours), '']);
+		lines.push([]);
+		lines.push([t('date'), t('colTotalTips'), t('colDayTips'), t('colNightTips'),
+			t('colServerPool', { pct: s.serverPct }), t('colKitchen', { pct: 100 - s.serverPct }), t('colDayHours'), t('colNightHours')]);
+		s.days.forEach(function (d) {
+			lines.push([d.date, d.totalTips === null ? '' : C.centsToPlain(d.totalTips), C.centsToPlain(d.dayTips),
+				d.totalTips === null ? '' : C.centsToPlain(d.nightTips), C.centsToPlain(d.pool), C.centsToPlain(d.kitchen),
+				C.formatHours(d.dayHours), C.formatHours(d.nightHours)]);
+		});
+		lines.push([t('total'), C.centsToPlain(s.totals.tips), C.centsToPlain(s.totals.dayTips), C.centsToPlain(s.totals.nightTips),
+			C.centsToPlain(s.totals.pool), C.centsToPlain(s.totals.kitchen), C.formatHours(s.totals.dayHours), C.formatHours(s.totals.nightHours)]);
 		const csv = '﻿' + lines.map(function (l) { return l.map(csvCell).join(','); }).join('\r\n');
-		download('tips_' + view.from + '_' + view.to + '.csv', csv, 'text/csv;charset=utf-8');
+		download('tips_' + s.from + '_' + s.to + '.csv', csv, 'text/csv;charset=utf-8');
 	}
 
 	/* ------------------------------------------------------------------ */
-	/* Share view (read-only, from #r=...)                                 */
+	/* Servers tab                                                         */
 	/* ------------------------------------------------------------------ */
 
-	function renderShareView(encoded) {
-		let view = null;
-		try {
-			view = C.viewFromSharePayload(C.decodeShare(encoded));
-		} catch (e) {
-			view = null;
-		}
-		lang = view ? view.lang : (data.settings.lang || I.detect());
-		document.documentElement.lang = lang;
-		document.body.classList.add('is-share');
-		document.getElementById('app-title').textContent = (view && view.title) || t('appTitle');
-		document.getElementById('app-subtitle').textContent = t('shareBanner');
-		document.title = ((view && view.title) ? view.title + ' · ' : '') + t('appTitle');
-		const tabs = document.getElementById('tabs');
-		tabs.replaceChildren();
-
-		function openCalculator() {
-			history.replaceState(null, '', window.location.pathname + window.location.search);
+	async function serverAction(fn, args, button) {
+		return busy(button, async function () {
+			try {
+				await API.rpc(fn, Object.assign({ p_token: S.token }, args));
+				await refreshBootstrap();
+			} catch (e) {
+				handleError(e);
+				return false;
+			}
 			render();
-		}
-
-		const main = document.getElementById('app');
-		if (!view) {
-			main.replaceChildren(el('section', { class: 'card empty' }, [
-				el('p', { text: t('shareBad') }),
-				el('button', { type: 'button', class: 'btn', onclick: openCalculator }, t('openCalculator')),
-			]));
-			return;
-		}
-		main.replaceChildren(el('div', { class: 'stack' }, [
-			renderReportBody(view),
-			el('div', { class: 'row no-print' }, [
-				el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
-			]),
-		]));
-	}
-
-	/* ------------------------------------------------------------------ */
-	/* Staff tab                                                           */
-	/* ------------------------------------------------------------------ */
-
-	function nameTaken(name, exceptId) {
-		const n = name.toLowerCase();
-		return data.servers.some(function (s) { return s.id !== exceptId && s.name.toLowerCase() === n; });
-	}
-
-	function serverHasHistory(id) {
-		return data.shifts.some(function (s) { return s.hours[id]; });
+			return true;
+		});
 	}
 
 	function renderStaffTab() {
-		const nameInput = el('input', { type: 'text', maxlength: C.MAX_NAME_LENGTH, placeholder: t('serverNamePlaceholder'), autocomplete: 'off' });
+		const nameInput = el('input', { type: 'text', maxlength: C.MAX_NAME_LENGTH, placeholder: t('serverNamePlaceholder'), autocomplete: 'off', 'aria-label': t('serverNamePlaceholder') });
+		const addBtn = el('button', { type: 'submit', class: 'btn primary' }, t('addServer'));
 
-		function onAdd(ev) {
+		async function onAdd(ev) {
 			ev.preventDefault();
 			const name = C.cleanName(nameInput.value);
 			if (!name) {
-				toast(t('errEmptyName'), 'error');
+				toast(t('err_invalid_name'), 'error');
 				return;
 			}
-			if (nameTaken(name)) {
-				toast(t('errDuplicateName'), 'error');
-				return;
-			}
-			data.servers.push({ id: genId('sv_'), name: name, active: true });
-			if (save()) {
-				render();
+			if (await serverAction('add_server', { p_name: name }, addBtn)) {
 				const again = document.querySelector('.add-server input');
 				if (again) {
 					again.focus();
@@ -782,20 +939,18 @@
 		}
 
 		function move(i, d) {
+			const ids = S.servers.map(function (s) { return s.id; });
 			const j = i + d;
-			if (j < 0 || j >= data.servers.length) {
+			if (j < 0 || j >= ids.length) {
 				return;
 			}
-			const tmp = data.servers[i];
-			data.servers[i] = data.servers[j];
-			data.servers[j] = tmp;
-			if (save()) {
-				render();
-			}
+			const tmp = ids[i];
+			ids[i] = ids[j];
+			ids[j] = tmp;
+			serverAction('set_server_order', { p_ids: ids });
 		}
 
-		const list = data.servers.map(function (s, i) {
-			const used = serverHasHistory(s.id);
+		const list = S.servers.map(function (s, i) {
 			return el('li', { class: 'server-row' + (s.active ? '' : ' is-inactive') }, [
 				el('input', {
 					type: 'text',
@@ -804,58 +959,45 @@
 					'aria-label': t('serverNamePlaceholder'),
 					onchange: function (e) {
 						const name = C.cleanName(e.target.value);
-						if (!name || nameTaken(name, s.id)) {
-							toast(t(name ? 'errDuplicateName' : 'errEmptyName'), 'error');
+						if (!name) {
 							e.target.value = s.name;
+							toast(t('err_invalid_name'), 'error');
 							return;
 						}
-						s.name = name;
-						if (save()) {
-							render();
-						}
+						serverAction('rename_server', { p_id: s.id, p_name: name }).then(function (ok) {
+							if (!ok) {
+								e.target.value = s.name;
+							}
+						});
 					},
 				}),
 				el('span', { class: 'badge ' + (s.active ? 'on' : 'off'), text: s.active ? t('active') : t('inactive') }),
-				el('div', { class: 'row tight' }, [
+				isAdmin() ? el('div', { class: 'row tight' }, [
 					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('moveUp'), disabled: i === 0, onclick: function () { move(i, -1); } }, '↑'),
-					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('moveDown'), disabled: i === data.servers.length - 1, onclick: function () { move(i, 1); } }, '↓'),
+					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('moveDown'), disabled: i === S.servers.length - 1, onclick: function () { move(i, 1); } }, '↓'),
 					el('button', {
 						type: 'button',
 						class: 'btn small',
-						onclick: function () {
-							s.active = !s.active;
-							if (save()) {
-								render();
-							}
-						},
+						onclick: function (e) { serverAction('set_server_active', { p_id: s.id, p_active: !s.active }, e.currentTarget); },
 					}, s.active ? t('deactivate') : t('activate')),
 					el('button', {
 						type: 'button',
 						class: 'btn small ghost danger',
-						disabled: used,
-						title: used ? t('cannotDeleteUsed') : null,
-						onclick: function () {
-							if (!window.confirm(t('confirmDeleteServer', { name: s.name }))) {
-								return;
-							}
-							data.servers = data.servers.filter(function (x) { return x.id !== s.id; });
-							if (save()) {
-								render();
+						onclick: function (e) {
+							if (window.confirm(t('confirmDeleteServer', { name: s.name }))) {
+								serverAction('delete_server', { p_id: s.id }, e.currentTarget);
 							}
 						},
 					}, t('delete')),
-				]),
+				]) : null,
 			]);
 		});
 
 		return el('section', { class: 'card' }, [
 			el('h2', { text: t('staffTitle') }),
-			el('p', { class: 'muted', text: t('staffHelp') }),
-			el('form', { class: 'row add-server', onsubmit: onAdd }, [
-				nameInput,
-				el('button', { type: 'submit', class: 'btn primary' }, t('addServer')),
-			]),
-			el('ul', { class: 'server-list' }, list),
+			el('p', { class: 'muted', text: isAdmin() ? t('staffHelpAdmin') : t('staffHelp') }),
+			el('form', { class: 'row add-server', onsubmit: onAdd }, [nameInput, addBtn]),
+			S.servers.length ? el('ul', { class: 'server-list' }, list) : el('p', { class: 'muted', text: t('noServersYet') }),
 		]);
 	}
 
@@ -864,147 +1006,145 @@
 	/* ------------------------------------------------------------------ */
 
 	function renderSettingsTab() {
-		const st = data.settings;
-		const cur = C.periodFor(st.periodAnchor, C.todayIso());
+		const st = S.settings;
+		const parts = [];
 
-		function set(key, value) {
-			st[key] = value;
-			if (save()) {
-				render();
-			}
-		}
-
-		function onImport(e) {
-			const file = e.target.files && e.target.files[0];
-			e.target.value = '';
-			if (!file) {
-				return;
-			}
-			file.text().then(function (text) {
-				let next;
-				try {
-					next = C.normalizeData(JSON.parse(text));
-				} catch (err) {
-					toast(t('importFailed'), 'error');
-					return;
-				}
-				if (!window.confirm(t('confirmImport', { servers: next.servers.length, shifts: next.shifts.length }))) {
-					return;
-				}
-				data = next;
-				loadRecovered = false;
-				if (save()) {
-					toast(t('importDone'));
-					render();
-				}
-			});
-		}
-
-		const fileInput = el('input', { type: 'file', accept: 'application/json,.json', class: 'visually-hidden', onchange: onImport });
-
-		return el('div', { class: 'stack' }, [
-			el('section', { class: 'card form' }, [
-				el('h2', { text: t('settingsTitle') }),
-				el('label', { class: 'field' }, [
-					el('span', { text: t('restaurantName') }),
-					el('input', {
-						type: 'text',
-						maxlength: C.MAX_NAME_LENGTH,
-						value: st.restaurantName,
-						onchange: function (e) { set('restaurantName', C.cleanName(e.target.value)); },
-					}),
-				]),
-				el('div', { class: 'row wrap' }, [
-					el('label', { class: 'field' }, [
-						el('span', { text: t('language') }),
-						el('select', { onchange: function (e) { set('lang', e.target.value); } }, [
-							el('option', { value: '', selected: !st.lang }, t('langAuto')),
-							el('option', { value: 'ko', selected: 'ko' === st.lang }, '한국어'),
-							el('option', { value: 'en', selected: 'en' === st.lang }, 'English'),
-						]),
-					]),
-					el('label', { class: 'field' }, [
-						el('span', { text: t('currency') }),
-						el('select', { onchange: function (e) { set('currency', e.target.value); } }, C.CURRENCIES.map(function (c) {
-							return el('option', { value: c, selected: c === st.currency }, c);
-						})),
-					]),
-				]),
-				el('label', { class: 'field' }, [
-					el('span', { text: t('periodAnchor') }),
-					el('input', {
-						type: 'date',
-						value: st.periodAnchor,
-						onchange: function (e) {
-							if (C.isIsoDate(e.target.value)) {
-								set('periodAnchor', e.target.value);
-							}
-						},
-					}),
-					el('small', { class: 'muted', text: t('periodAnchorHelp', { from: niceDate(cur.from, true), to: niceDate(cur.to, true) }) }),
-				]),
-				el('fieldset', { class: 'field' }, [
-					el('legend', { text: t('splitMode') }),
-					radio('perShift', t('splitPerShift'), t('splitPerShiftHelp')),
-					radio('pooled', t('splitPooled'), t('splitPooledHelp')),
-				]),
-			]),
-			el('section', { class: 'card' }, [
-				el('h2', { text: t('backupTitle') }),
-				el('p', { class: 'muted', text: t('backupHelp') }),
-				el('div', { class: 'row wrap' }, [
-					el('button', {
-						type: 'button',
-						class: 'btn primary',
-						onclick: function () {
-							download('kai-calculator-backup-' + C.todayIso() + '.json', JSON.stringify(data, null, 2), 'application/json');
-						},
-					}, t('exportJson')),
-					el('button', { type: 'button', class: 'btn', onclick: function () { fileInput.click(); } }, t('importJson')),
-					fileInput,
-				]),
-			]),
-			el('section', { class: 'card' }, [
-				el('h2', { text: t('dangerTitle') }),
-				el('button', {
-					type: 'button',
-					class: 'btn danger',
-					onclick: function () {
-						if (!window.confirm(t('confirmReset'))) {
-							return;
-						}
-						data = C.emptyData();
-						if (save()) {
-							render();
-						}
+		parts.push(el('section', { class: 'card form' }, [
+			el('h2', { text: t('settingsTitle') }),
+			el('label', { class: 'field' }, [
+				el('span', { text: t('language') }),
+				el('select', {
+					onchange: function (e) {
+						lang = e.target.value;
+						lsSet(LANG_KEY, lang);
+						document.documentElement.lang = lang;
+						render();
 					},
-				}, t('resetAll')),
+				}, [
+					el('option', { value: 'ko', selected: 'ko' === lang }, '한국어'),
+					el('option', { value: 'en', selected: 'en' === lang }, 'English'),
+				]),
 			]),
-		]);
+			el('ul', { class: 'facts' }, [
+				el('li', { text: t('factSplit', { pct: st.server_pct, kpct: 100 - st.server_pct }) }),
+				el('li', { text: t('factWindow', { hours: st.edit_window_hours }) }),
+				el('li', { text: t('factRetention', { months: st.retention_months }) }),
+				el('li', { text: t('factTimezone', { tz: st.timezone }) }),
+			]),
+			el('button', {
+				type: 'button',
+				class: 'btn',
+				onclick: async function () {
+					try {
+						await API.rpc('logout', { p_token: S.token });
+					} catch (e) { /* logging out locally is enough */ }
+					clearSession();
+					renderLogin();
+				},
+			}, t('logout')),
+		]));
 
-		function radio(value, label, help) {
-			return el('label', { class: 'radio' }, [
-				el('input', { type: 'radio', name: 'splitMode', value: value, checked: st.splitMode === value, onchange: function () { set('splitMode', value); } }),
-				el('span', null, [el('strong', { text: label }), el('small', { class: 'muted', text: help })]),
-			]);
+		if (!isAdmin()) {
+			return el('div', { class: 'stack' }, parts);
 		}
+
+		const nameIn = el('input', { type: 'text', maxlength: 60, value: st.restaurant_name });
+		const pctIn = el('input', { type: 'number', min: 1, max: 100, step: 1, inputmode: 'numeric', value: String(st.server_pct) });
+		const anchorIn = el('input', { type: 'date', value: st.period_anchor });
+		const cur = C.periodFor(st.period_anchor, S.today);
+		const saveBtn = el('button', { type: 'submit', class: 'btn primary' }, t('save'));
+
+		parts.push(el('form', {
+			class: 'card form',
+			onsubmit: async function (ev) {
+				ev.preventDefault();
+				const pct = Number(pctIn.value);
+				if (!Number.isInteger(pct) || pct < 1 || pct > 100 || !C.isIsoDate(anchorIn.value)) {
+					toast(t('err_invalid_settings'), 'error');
+					return;
+				}
+				await busy(saveBtn, async function () {
+					try {
+						await API.rpc('update_settings', { p_token: S.token, p_restaurant_name: nameIn.value, p_server_pct: pct, p_period_anchor: anchorIn.value });
+						await refreshBootstrap();
+					} catch (e) {
+						handleError(e);
+						return;
+					}
+					toast(t('saved'));
+					render();
+				});
+			},
+		}, [
+			el('h2', { text: t('adminSettingsTitle') }),
+			el('label', { class: 'field' }, [el('span', { text: t('restaurantName') }), nameIn]),
+			el('label', { class: 'field' }, [el('span', { text: t('serverPct') }), pctIn, el('small', { class: 'muted', text: t('serverPctHelp') })]),
+			el('label', { class: 'field' }, [
+				el('span', { text: t('periodAnchor') }),
+				anchorIn,
+				el('small', { class: 'muted', text: t('periodAnchorHelp', { from: niceDate(cur.from, true), to: niceDate(cur.to, true) }) }),
+			]),
+			saveBtn,
+		]));
+
+		parts.push(passwordForm('staff', t('changePin'), t('changePinHelp'), 4));
+		parts.push(passwordForm('admin', t('changeAdminPw'), t('changeAdminPwHelp'), 8));
+		return el('div', { class: 'stack' }, parts);
+	}
+
+	function passwordForm(kind, title, help, min) {
+		const a = el('input', { type: 'password', autocomplete: 'new-password', minlength: min, maxlength: 200, 'aria-label': t('newPassword') });
+		const b = el('input', { type: 'password', autocomplete: 'new-password', minlength: min, maxlength: 200, 'aria-label': t('confirmPassword') });
+		const btn = el('button', { type: 'submit', class: 'btn' }, t('change'));
+		return el('form', {
+			class: 'card form',
+			onsubmit: async function (ev) {
+				ev.preventDefault();
+				if (a.value.length < min) {
+					toast(t('errPasswordShort', { n: min }), 'error');
+					return;
+				}
+				if (a.value !== b.value) {
+					toast(t('errPasswordMismatch'), 'error');
+					return;
+				}
+				await busy(btn, async function () {
+					try {
+						await API.rpc('change_password', { p_token: S.token, p_kind: kind, p_new_password: a.value });
+					} catch (e) {
+						handleError(e);
+						return;
+					}
+					a.value = '';
+					b.value = '';
+					toast(t('passwordChanged'));
+				});
+			},
+		}, [
+			el('h2', { text: title }),
+			el('p', { class: 'muted small', text: help }),
+			el('label', { class: 'field' }, [el('span', { text: t('newPassword') }), a]),
+			el('label', { class: 'field' }, [el('span', { text: t('confirmPassword') }), b]),
+			btn,
+		]);
 	}
 
 	/* ------------------------------------------------------------------ */
 	/* Boot                                                                */
 	/* ------------------------------------------------------------------ */
 
-	data = load();
-
-	window.addEventListener('hashchange', render);
-	window.addEventListener('storage', function (e) {
-		if (e.key !== STORAGE_KEY) {
-			return;
+	// Coming back to the app (e.g. after checking the POS): refresh "today"
+	// and the session silently. Never re-render here — that would wipe
+	// what the user was typing.
+	document.addEventListener('visibilitychange', function () {
+		if ('visible' === document.visibilityState && S.role) {
+			refreshBootstrap().catch(function (e) {
+				if (e && e.code === 'not_authenticated') {
+					handleError(e);
+				}
+			});
 		}
-		data = load();
-		render();
-		toast(t('otherTabChanged'));
 	});
 
-	render();
+	boot();
 }());

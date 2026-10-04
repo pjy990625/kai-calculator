@@ -3,7 +3,7 @@ on:
   push:
   pull_request:
 jobs:
-  test:
+  unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -11,3 +11,8 @@ jobs:
         with:
           node-version: 22
       - run: npm test
+  database:
+    runs-on: ubuntu-24.04 # ships PostgreSQL 16 server binaries
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tests/db/run.sh
