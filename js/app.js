@@ -10,19 +10,6 @@
 (function () {
 	'use strict';
 
-	// Older phones (iOS < 14, Chrome < 86) lack Element.replaceChildren.
-	if (!Element.prototype.replaceChildren) {
-		Element.prototype.replaceChildren = function () {
-			while (this.firstChild) {
-				this.removeChild(this.firstChild);
-			}
-			for (let i = 0; i < arguments.length; i++) {
-				const n = arguments[i];
-				this.appendChild(typeof n === 'string' ? document.createTextNode(n) : n);
-			}
-		};
-	}
-
 	const C = window.KaiCalc;
 	const I = window.KaiI18n;
 	const API = window.KaiApi;
@@ -556,8 +543,8 @@
 
 		function update() {
 			const f = readForm();
-			foot.day.textContent = C.formatHours(f.byShift.day.reduce(function (x, e) { return x + e.weight; }, 0));
-			foot.night.textContent = C.formatHours(f.byShift.night.reduce(function (x, e) { return x + e.weight; }, 0));
+			foot.day.textContent = C.formatHours(C.sumWeights(f.byShift.day));
+			foot.night.textContent = C.formatHours(C.sumWeights(f.byShift.night));
 			if (f.dayTipsInvalid || f.totalInvalid) {
 				// Don't show amounts computed from a half-typed / wrong number.
 				nightOut.textContent = '—';
@@ -580,12 +567,7 @@
 					a && b ? el('small', { class: 'muted block', text: t('day') + ' ' + money(a) + ' · ' + t('night') + ' ' + money(b) }) : null,
 				]);
 			});
-			// What the servers actually receive (whole dollars), like the report total.
-			let paid = 0;
-			[d, n].forEach(function (r) {
-				Object.keys(r.shares).forEach(function (k) { paid += r.shares[k]; });
-			});
-			foot.share.textContent = money(paid);
+			foot.share.textContent = money(d.paid + n.paid); // what servers actually receive, like the report
 			const left = d.leftover + n.leftover;
 			splitOut.textContent = t('splitLine', {
 				pct: pct, kpct: 100 - pct, servers: money(d.pool + n.pool), kitchen: money(d.kitchen + n.kitchen),
@@ -895,8 +877,7 @@
 			el('tfoot', null, el('tr', null, [el('th', { text: t('total') })].concat(cells({
 				tips: tot.serverTips, hours: tot.hours, perHourCents: tot.perHourCents,
 				dayHours: tot.dayHours, nightHours: tot.nightHours,
-				dayTips: rows.reduce(function (a, r) { return a + r.dayTips; }, 0),
-				nightTips: rows.reduce(function (a, r) { return a + r.nightTips; }, 0),
+				dayTips: tot.serverDayTips, nightTips: tot.serverNightTips,
 			}, 'th')))),
 		]));
 	}
@@ -938,10 +919,6 @@
 		return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 	}
 
-	function sumOf(list, key) {
-		return list.reduce(function (a, x) { return a + x[key]; }, 0);
-	}
-
 	function downloadCsv(s) {
 		const lines = [];
 		lines.push([s.from + ' ~ ' + s.to]);
@@ -951,8 +928,8 @@
 				C.formatHours(r.dayHours), C.centsToPlain(r.dayTips), C.formatHours(r.nightHours), C.centsToPlain(r.nightTips)]);
 		});
 		lines.push([t('total'), C.centsToPlain(s.totals.serverTips), C.formatHours(s.totals.hours), C.centsToPlain(s.totals.perHourCents),
-			C.formatHours(s.totals.dayHours), C.centsToPlain(sumOf(s.rows, 'dayTips')),
-			C.formatHours(s.totals.nightHours), C.centsToPlain(sumOf(s.rows, 'nightTips'))]);
+			C.formatHours(s.totals.dayHours), C.centsToPlain(s.totals.serverDayTips),
+			C.formatHours(s.totals.nightHours), C.centsToPlain(s.totals.serverNightTips)]);
 		lines.push([]);
 		lines.push([t('date'), t('colTotalTips'), t('colDayTips'), t('colNightTips'),
 			t('colServerPool', { pct: s.serverPct }), t('colKitchen', { pct: 100 - s.serverPct }), t('colLeftover'), t('colDayHours'), t('colNightHours')]);

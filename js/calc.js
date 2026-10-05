@@ -169,34 +169,9 @@
 	/* Splitting                                                           */
 	/* ------------------------------------------------------------------ */
 
-	/**
-	 * Split `total` cents proportionally to integer weights using the
-	 * largest-remainder method, so the parts ALWAYS add up to exactly
-	 * `total`. Ties go to the earlier entry, so results are deterministic.
-	 *
-	 * @param {number} total integer cents
-	 * @param {{key:string, weight:number}[]} entries weights > 0
-	 * @returns {Object<string, number>} key → cents
-	 */
-	function splitByWeight(total, entries) {
-		const out = {};
-		const sumW = entries.reduce(function (a, e) { return a + e.weight; }, 0);
-		if (!entries.length || sumW <= 0) {
-			return out;
-		}
-		let given = 0;
-		const rems = entries.map(function (e, i) {
-			const exact = total * e.weight; // < 2^53 for realistic inputs
-			const base = Math.floor(exact / sumW);
-			out[e.key] = (out[e.key] || 0) + base;
-			given += base;
-			return { key: e.key, rem: exact % sumW, i: i };
-		});
-		rems.sort(function (a, b) { return b.rem - a.rem || a.i - b.i; });
-		for (let j = 0; j < total - given; j++) {
-			out[rems[j].key] += 1;
-		}
-		return out;
+	/** Sum of `weight` over entries (hours in hundredths). */
+	function sumWeights(entries) {
+		return entries.reduce(function (a, e) { return a + e.weight; }, 0);
 	}
 
 	/** Servers' part of `tips` at `pct` percent, rounded half-up to the cent. */
@@ -222,8 +197,8 @@
 	 */
 	function splitWholeDollars(tips, pct, entries) {
 		const out = {};
-		const sumW = entries.reduce(function (a, e) { return a + e.weight; }, 0);
-		if (!entries.length || sumW <= 0) {
+		const sumW = sumWeights(entries);
+		if (sumW <= 0) {
 			return out;
 		}
 		// Exact share in dollars = tips·pct·w / (100 cents · 100 % · sumW).
@@ -234,7 +209,7 @@
 		entries.forEach(function (e) {
 			const exact = tips * pct * e.weight; // < 2^53 for realistic inputs
 			const dollars = Math.floor(exact / den);
-			out[e.key] = dollars;
+			out[e.key] = dollars * 100;
 			given += dollars;
 			const rem = exact % den;
 			if (rem * 2 >= den) { // fraction >= .50 → wants to round up
@@ -248,29 +223,30 @@
 			if (keys.length > spare) {
 				break;
 			}
-			keys.forEach(function (k) { out[k] += 1; });
+			keys.forEach(function (k) { out[k] += 100; });
 			spare -= keys.length;
 		}
-		Object.keys(out).forEach(function (k) { out[k] *= 100; });
 		return out;
 	}
 
 	/**
 	 * One shift: servers get `pct`% split by hours (whole dollars, see
 	 * splitWholeDollars), the rest goes to the kitchen.
-	 *   pool = sum(shares) + leftover + unallocated, and pool + kitchen = tips.
+	 *   pool = paid + leftover + unallocated, and pool + kitchen = tips,
+	 * where paid = sum(shares) is what the servers actually receive.
 	 * If nobody has hours, the servers' pool is reported as `unallocated`.
 	 */
 	function splitShift(tips, pct, entries) {
 		const pool = serverPool(tips, pct);
 		const worked = entries.filter(function (e) { return e.weight > 0; });
-		const shares = worked.length ? splitWholeDollars(tips, pct, worked) : {};
+		const shares = splitWholeDollars(tips, pct, worked);
 		const paid = Object.keys(shares).reduce(function (a, k) { return a + shares[k]; }, 0);
 		return {
 			tips: tips,
 			pool: pool,
 			kitchen: tips - pool,
 			shares: shares,
+			paid: paid,
 			leftover: worked.length ? pool - paid : 0,
 			unallocated: worked.length ? 0 : pool,
 		};
@@ -341,7 +317,7 @@
 			return rows[id];
 		}
 
-		const totals = Object.assign(emptyTotals(), { pool: 0, kitchen: 0, leftover: 0, unallocated: 0, serverTips: 0 });
+		const totals = Object.assign(emptyTotals(), { pool: 0, kitchen: 0, leftover: 0, unallocated: 0, serverTips: 0, serverDayTips: 0, serverNightTips: 0 });
 		const dayList = [];
 		const warnings = [];
 
@@ -403,6 +379,8 @@
 			totals.dayHours += r.dayHours;
 			totals.nightHours += r.nightHours;
 			totals.serverTips += r.tips;
+			totals.serverDayTips += r.dayTips;
+			totals.serverNightTips += r.nightTips;
 		});
 		totals.hours = totals.dayHours + totals.nightHours;
 		totals.tips = totals.dayTips + totals.nightTips;
@@ -437,7 +415,7 @@
 		formatHours: formatHours,
 		centsToPlain: centsToPlain,
 		cleanName: cleanName,
-		splitByWeight: splitByWeight,
+		sumWeights: sumWeights,
 		splitWholeDollars: splitWholeDollars,
 		serverPool: serverPool,
 		splitShift: splitShift,

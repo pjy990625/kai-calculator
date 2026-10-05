@@ -133,7 +133,7 @@ main { padding-top: 16px; padding-bottom: 48px; }
 .field.grow { flex: 1 1 200px; }
 fieldset.field { border: 0; padding: 0; }
 
-input[type="text"], input[type="date"], select {
+input[type="text"], input[type="date"], input[type="number"], input[type="password"], select {
 	font: inherit;
 	font-size: 16px; /* below 16px, iPhone Safari zooms in on focus */
 	color: inherit;
@@ -172,10 +172,6 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 .btn.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
 .btn.ghost.danger { border-color: transparent; }
 .btn.small { padding: 4px 10px; min-height: 32px; font-size: .85rem; }
-/* Phones / touch screens: every small button at least 40×40 for fingers. */
-@media (pointer: coarse) {
-	.btn.small, .row.nav .btn { min-height: 40px; min-width: 40px; }
-}
 
 .segmented {
 	display: inline-flex;
@@ -252,7 +248,7 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	font: inherit; font-weight: 600;
 	color: var(--accent);
 	background: none; border: 0;
-	padding: 8px 0; margin: -8px 0; /* bigger tap area on phones, same row height */
+	padding: 10px 0; margin: -10px 0; /* bigger tap area, same row height */
 	text-decoration: underline; text-underline-offset: 3px;
 	cursor: pointer;
 }
@@ -306,8 +302,8 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	font-variant-numeric: tabular-nums;
 }
 .split-line { font-weight: 600; color: var(--accent); }
-.notice.lock { background: var(--surface-2); border: 1px solid var(--line); }
-.notice.info { background: var(--surface-2); border: 1px solid var(--line); font-weight: 500; }
+.notice.lock, .notice.info { background: var(--surface-2); border: 1px solid var(--line); }
+.notice.info { font-weight: 500; }
 .entry-grid .hours-cell { width: 96px; }
 .entry-grid small { font-weight: 400; font-size: .75rem; }
 input:disabled { opacity: .65; background: var(--surface-2); }
@@ -316,14 +312,6 @@ tr.clickable:hover td { background: var(--surface-2); }
 .badge.admin { background: var(--night-soft); color: var(--night); }
 .facts { margin: 0 0 16px; padding-left: 18px; color: var(--muted); }
 .facts li { margin: 2px 0; }
-input[type="number"], input[type="password"] {
-	font: inherit; color: inherit;
-	font-size: 16px; /* below 16px, iPhone Safari zooms in on focus */
-	background: var(--surface);
-	border: 1px solid var(--line);
-	border-radius: var(--radius-sm);
-	padding: 9px 10px; min-height: 42px; width: 100%;
-}
 .card.form > .btn { margin-top: 4px; }
 
 /* Toasts */
@@ -371,8 +359,8 @@ input[type="number"], input[type="password"] {
 	.sub-report { break-inside: avoid; }
 }
 
-/* Touch screens (must come after the base rules it overrides). */
+/* Touch screens: every button at least 40px for fingers (after the base rules it overrides). */
 @media (pointer: coarse) {
+	.btn.small, .row.nav .btn { min-height: 40px; min-width: 40px; }
 	.segmented button { min-height: 40px; }
-	.btn.link, button.link { padding: 10px 0; margin: -10px 0; }
 }

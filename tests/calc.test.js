@@ -41,18 +41,6 @@ test('parseHours / formatHours', () => {
 	assert.equal(C.formatHours(500), '5');
 });
 
-test('splitByWeight always sums to the total exactly', () => {
-	assert.deepEqual(C.splitByWeight(10000, [{ key: 'a', weight: 1 }, { key: 'b', weight: 1 }, { key: 'c', weight: 1 }]),
-		{ a: 3334, b: 3333, c: 3333 });
-	for (let i = 0; i < 2000; i++) {
-		const total = Math.floor(Math.random() * 500000);
-		const entries = Array.from({ length: 1 + Math.floor(Math.random() * 10) },
-			(_, k) => ({ key: 'k' + k, weight: 1 + Math.floor(Math.random() * 1200) }));
-		const out = C.splitByWeight(total, entries);
-		assert.equal(Object.values(out).reduce((x, y) => x + y, 0), total);
-	}
-});
-
 test('serverPool is 60% rounded half-up; kitchen gets exactly the rest', () => {
 	assert.equal(C.serverPool(10000, 60), 6000);
 	assert.equal(C.serverPool(10001, 60), 6001); // 6000.6 → 6001
@@ -105,6 +93,7 @@ test('two-week totals add up across days and stay exact', () => {
 	const s = C.summarize({ serverPct: 60, servers, days, hours }, '2026-09-28', '2026-10-11');
 	assert.equal(s.totals.serverTips + s.totals.leftover + s.totals.kitchen, s.totals.tips);
 	assert.equal(s.rows.reduce((a, r) => a + r.tips, 0), s.totals.serverTips);
+	assert.equal(s.totals.serverDayTips + s.totals.serverNightTips, s.totals.serverTips);
 	assert.ok(s.rows.every((r) => r.dayTips % 100 === 0 && r.nightTips % 100 === 0), 'whole dollars');
 	assert.ok(s.totals.leftover >= 0);
 	assert.equal(s.days.length, 14);
@@ -137,6 +126,7 @@ test('rounding rule: whole dollars, never above the pool, through splitShift', (
 		const entries = [{ key: 'a', weight: 333 }, { key: 'b', weight: 333 }, { key: 'c', weight: 517 }, { key: 'd', weight: 50 }];
 		const r = C.splitShift(tips, 60, entries);
 		const paid = Object.values(r.shares).reduce((a, b) => a + b, 0);
+		assert.equal(r.paid, paid);
 		assert.ok(Object.values(r.shares).every((c) => c % 100 === 0), 'whole dollars');
 		assert.ok(paid * 100 <= tips * 60, 'never above 60% of the tips');
 		assert.equal(r.shares.a, r.shares.b, 'same hours → same pay');

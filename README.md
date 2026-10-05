@@ -149,6 +149,7 @@
 index.html              페이지 뼈대
 manifest.webmanifest    홈 화면 아이콘 설정 (icons/)
 css/style.css           스타일 (다크 모드, 모바일, 인쇄)
+js/compat.js            오래된 휴대폰용 대체 코드 (가장 먼저 로드)
 js/config.js            Supabase URL + publishable key (공개값)
 js/api.js               Supabase RPC 호출 (fetch, 라이브러리 없음)
 js/calc.js              순수 계산 로직 — 60/40 분배, 기간 (DOM/네트워크 없음, 테스트 대상)
