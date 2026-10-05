@@ -120,6 +120,30 @@ test('missing whole-day total and tips with no hours are warned, never lost', ()
 	assert.equal(s.totals.pool, s.totals.serverTips + s.totals.unallocated);
 });
 
+test('per-server daily breakdown matches the per-person totals', () => {
+	const days = [];
+	const hours = [];
+	for (let i = 0; i < 15; i++) {
+		const date = C.addDays('2026-10-01', i);
+		days.push({ date, dayTips: 20000 + i * 101, totalTips: 61003 + i * 7 });
+		if (i % 3) hours.push(h(date, 'a', 'day', 450));
+		hours.push(h(date, 'b', 'day', 525), h(date, 'b', 'night', 600), h(date, 'c', 'night', 375 + i));
+	}
+	const s = C.summarize({ serverPct: 60, servers, days, hours }, '2026-10-01', '2026-10-15');
+	for (const r of s.rows) {
+		const list = s.serverDays[r.id];
+		const sum = (k) => list.reduce((a, d) => a + d[k], 0);
+		assert.equal(sum('hours'), r.hours, r.name + ' hours');
+		assert.equal(sum('dayHours'), r.dayHours);
+		assert.equal(sum('nightHours'), r.nightHours);
+		assert.equal(sum('tips'), r.tips, r.name + ' tips');
+		assert.deepEqual(list.map((d) => d.date), [...list.map((d) => d.date)].sort());
+	}
+	assert.equal(s.serverDays.a.length, 10); // Alice skipped every third day
+	assert.equal(s.serverDays.a[0].date, '2026-10-02');
+	assert.equal(s.serverDays.c[0].nightHours, 375);
+});
+
 test('range filter is inclusive', () => {
 	const s = C.summarize({
 		serverPct: 60,
@@ -131,9 +155,17 @@ test('range filter is inclusive', () => {
 });
 
 test('period and month helpers', () => {
-	assert.deepEqual(C.periodFor('2026-09-28', '2026-10-03'), { from: '2026-09-28', to: '2026-10-11' });
-	assert.deepEqual(C.periodFor('2026-09-28', '2026-09-27'), { from: '2026-09-14', to: '2026-09-27' });
-	assert.deepEqual(C.periodFor('2026-10-26', '2026-11-08'), { from: '2026-10-26', to: '2026-11-08' });
+	assert.deepEqual(C.payPeriodFor('2026-10-01'), { from: '2026-10-01', to: '2026-10-15' });
+	assert.deepEqual(C.payPeriodFor('2026-10-15'), { from: '2026-10-01', to: '2026-10-15' });
+	assert.deepEqual(C.payPeriodFor('2026-10-16'), { from: '2026-10-16', to: '2026-10-31' });
+	assert.deepEqual(C.payPeriodFor('2026-09-30'), { from: '2026-09-16', to: '2026-09-30' });
+	assert.deepEqual(C.payPeriodFor('2027-02-20'), { from: '2027-02-16', to: '2027-02-28' });
+	assert.deepEqual(C.payPeriodFor('2028-02-29'), { from: '2028-02-16', to: '2028-02-29' });
+	assert.deepEqual(C.shiftPayPeriod('2026-10-05', -1), { from: '2026-09-16', to: '2026-09-30' });
+	assert.deepEqual(C.shiftPayPeriod('2026-10-05', 1), { from: '2026-10-16', to: '2026-10-31' });
+	assert.deepEqual(C.shiftPayPeriod('2026-12-20', 1), { from: '2027-01-01', to: '2027-01-15' });
+	assert.deepEqual(C.shiftPayPeriod('2026-01-03', -1), { from: '2025-12-16', to: '2025-12-31' });
+	assert.deepEqual(C.shiftPayPeriod('2026-10-05', 0), { from: '2026-10-01', to: '2026-10-15' });
 	assert.deepEqual(C.monthRange('2028-02'), { from: '2028-02-01', to: '2028-02-29' });
 	assert.equal(C.shiftMonth('2026-01', -1), '2025-12');
 });

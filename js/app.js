@@ -15,6 +15,7 @@
 	const API = window.KaiApi;
 	const TOKEN_KEY = 'kai-calculator:token';
 	const LANG_KEY = 'kai-calculator:lang';
+	const ME_KEY = 'kai-calculator:me'; // which server "My hours" shows on this phone
 
 	const S = {
 		token: null,
@@ -27,6 +28,9 @@
 		entryDate: null,
 		reportKind: 'period',
 		reportDate: null,
+		mineId: null,
+		mineKind: 'period',
+		mineDate: null,
 	};
 	let lang = 'en';
 	let renderSeq = 0;
@@ -222,11 +226,15 @@
 		if (!S.reportDate) {
 			S.reportDate = S.today;
 		}
+		if (!S.mineDate) {
+			S.mineDate = S.today;
+		}
 	}
 
 	async function boot() {
 		lang = lsGet(LANG_KEY) || I.detect();
 		document.documentElement.lang = lang;
+		S.mineId = S.mineId || lsGet(ME_KEY);
 		if (!API.configured()) {
 			renderSetupNeeded();
 			return;
@@ -286,6 +294,7 @@
 		}
 		tabs.replaceChildren.apply(tabs, [
 			['entry', t('tabEntry')],
+			['mine', t('tabMine')],
 			['report', t('tabReport')],
 			['staff', t('tabStaff')],
 			['settings', t('tabSettings')],
@@ -308,6 +317,8 @@
 		const seq = ++renderSeq;
 		if ('report' === S.tab) {
 			renderReportTab(seq);
+		} else if ('mine' === S.tab) {
+			renderMineTab(seq);
 		} else if ('staff' === S.tab) {
 			setMain(renderStaffTab());
 		} else if ('settings' === S.tab) {
@@ -409,6 +420,7 @@
 				S.tab = 'entry';
 				S.entryDate = null;
 				S.reportDate = null;
+				S.mineDate = null;
 				boot();
 			});
 		}
@@ -445,7 +457,7 @@
 
 	function renderEntryTab(seq) {
 		const date = S.entryDate;
-		const p = C.periodFor(S.settings.period_anchor, date);
+		const p = C.payPeriodFor(date);
 		loadRange(seq, p.from, p.to, function (range) {
 			const input = calcInput(range);
 			const rec = input.days.find(function (d) { return d.date === date; }) || null;
@@ -723,39 +735,41 @@
 	/* Report tab                                                          */
 	/* ------------------------------------------------------------------ */
 
-	function reportRange() {
-		if ('month' === S.reportKind) {
-			return C.monthRange(C.monthKey(S.reportDate));
+	/** Pay period (1st–15th / 16th–end) or calendar month containing `date`. */
+	function rangeFor(kind, date) {
+		return 'month' === kind ? C.monthRange(C.monthKey(date)) : C.payPeriodFor(date);
+	}
+
+	/** "2주 / 월" switch + ‹ range › navigation, shared by Reports and My hours. */
+	function rangeControls(kind, r, onKind, onDate) {
+		const isMonth = 'month' === kind;
+		function move(n) {
+			onDate(isMonth ? C.shiftMonth(C.monthKey(r.from), n) + '-01' : C.shiftPayPeriod(r.from, n).from);
 		}
-		return C.periodFor(S.settings.period_anchor, S.reportDate);
+		return [
+			segmented([{ value: 'period', label: t('reportPeriod') }, { value: 'month', label: t('reportMonth') }], kind, onKind),
+			el('div', { class: 'row nav' }, [
+				el('button', { type: 'button', class: 'btn ghost', 'aria-label': t('prev'), onclick: function () { move(-1); } }, '‹'),
+				el('strong', { text: isMonth ? monthLabel(C.monthKey(r.from)) : rangeLabel(r.from, r.to) }),
+				el('button', { type: 'button', class: 'btn ghost', 'aria-label': t('next'), disabled: r.to >= S.today, onclick: function () { move(1); } }, '›'),
+			]),
+		];
 	}
 
 	function renderReportTab(seq) {
-		const r = reportRange();
+		const r = rangeFor(S.reportKind, S.reportDate);
 		const isMonth = 'month' === S.reportKind;
 		loadRange(seq, r.from, r.to, function (range) {
 			const s = C.summarize(calcInput(range), r.from, r.to);
-
-			function move(n) {
-				S.reportDate = isMonth ? C.shiftMonth(C.monthKey(S.reportDate), n) + '-01' : C.addDays(r.from, n * C.PERIOD_DAYS);
-				render();
-			}
-
-			const controls = el('div', { class: 'card controls no-print' }, [
-				segmented([{ value: 'period', label: t('reportPeriod') }, { value: 'month', label: t('reportMonth') }], S.reportKind, function (v) {
-					S.reportKind = v;
-					render();
-				}),
-				el('div', { class: 'row nav' }, [
-					el('button', { type: 'button', class: 'btn ghost', 'aria-label': t('prev'), onclick: function () { move(-1); } }, '‹'),
-					el('strong', { text: isMonth ? monthLabel(C.monthKey(r.from)) : rangeLabel(r.from, r.to) }),
-					el('button', { type: 'button', class: 'btn ghost', 'aria-label': t('next'), disabled: r.to >= S.today, onclick: function () { move(1); } }, '›'),
-				]),
+			const controls = el('div', { class: 'card controls no-print' }, rangeControls(S.reportKind, r,
+				function (v) { S.reportKind = v; render(); },
+				function (d) { S.reportDate = d; render(); }
+			).concat([
 				el('div', { class: 'row wrap' }, [
 					el('button', { type: 'button', class: 'btn', onclick: function () { downloadCsv(s); } }, t('downloadCsv')),
 					el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
 				]),
-			]);
+			]));
 			return el('div', { class: 'stack' }, [controls, renderReportBody(s, isMonth)]);
 		});
 	}
@@ -831,7 +845,20 @@
 				el('th', { class: 'num night-col', text: t('colNightTips') }),
 			])),
 			el('tbody', null, rows.map(function (r) {
-				return el('tr', null, [el('td', { class: 'name', text: r.name || t('unknownServer') })].concat(cells(r, 'td')));
+				const name = r.name || t('unknownServer');
+				return el('tr', null, [el('td', { class: 'name' }, r.name ? el('button', {
+					type: 'button',
+					class: 'link',
+					title: t('openPerson', { name: name }),
+					onclick: function () {
+						S.mineId = r.id;
+						S.mineKind = S.reportKind;
+						S.mineDate = S.reportDate;
+						S.tab = 'mine';
+						render();
+						window.scrollTo(0, 0);
+					},
+				}, name) : name)].concat(cells(r, 'td')));
 			})),
 			el('tfoot', null, el('tr', null, [el('th', { text: t('total') })].concat(cells({
 				tips: tot.serverTips, hours: tot.hours, perHourCents: tot.perHourCents,
@@ -899,6 +926,100 @@
 			C.centsToPlain(s.totals.pool), C.centsToPlain(s.totals.kitchen), C.formatHours(s.totals.dayHours), C.formatHours(s.totals.nightHours)]);
 		const csv = '﻿' + lines.map(function (l) { return l.map(csvCell).join(','); }).join('\r\n');
 		download('tips_' + s.from + '_' + s.to + '.csv', csv, 'text/csv;charset=utf-8');
+	}
+
+	/* ------------------------------------------------------------------ */
+	/* My hours tab — one server's hours and tips, day by day              */
+	/* ------------------------------------------------------------------ */
+
+	function renderMineTab(seq) {
+		const known = S.servers.some(function (x) { return x.id === S.mineId; });
+		const id = known ? S.mineId : null;
+		const picker = el('label', { class: 'field' }, [
+			el('span', { text: t('pickYourName') }),
+			el('select', {
+				onchange: function (e) {
+					S.mineId = e.target.value || null;
+					if (S.mineId) {
+						lsSet(ME_KEY, S.mineId);
+					}
+					render();
+				},
+			}, [el('option', { value: '', selected: !id }, '—')].concat(S.servers
+				.filter(function (x) { return x.active || x.id === id; })
+				.map(function (x) { return el('option', { value: x.id, selected: x.id === id }, x.name); }))),
+		]);
+
+		if (!id) {
+			setMain(el('section', { class: 'card' }, [
+				el('h2', { text: t('tabMine') }),
+				el('p', { class: 'muted', text: S.servers.length ? t('pickYourNameHelp') : t('noServersYet') }),
+				S.servers.length ? picker : null,
+			]));
+			return;
+		}
+
+		const r = rangeFor(S.mineKind, S.mineDate);
+		const isMonth = 'month' === S.mineKind;
+		const me = S.servers.find(function (x) { return x.id === id; });
+		loadRange(seq, r.from, r.to, function (range) {
+			const s = C.summarize(calcInput(range), r.from, r.to);
+			const row = s.rows.find(function (x) { return x.id === id; });
+			const list = s.serverDays[id] || [];
+			const missing = {};
+			s.warnings.forEach(function (w) {
+				if ('missingTotal' === w.type) {
+					missing[w.date] = true;
+				}
+			});
+			const pending = list.some(function (d) { return missing[d.date] && d.nightHours > 0; });
+
+			const controls = el('div', { class: 'card controls' }, [picker].concat(rangeControls(S.mineKind, r,
+				function (v) { S.mineKind = v; render(); },
+				function (d) { S.mineDate = d; render(); }
+			)));
+
+			const body = el('section', { class: 'card report' }, [
+				el('header', { class: 'report-head' }, [
+					el('p', { class: 'eyebrow', text: t('tabMine') }),
+					el('h2', { text: me.name }),
+					el('p', { class: 'muted', text: isMonth ? monthLabel(C.monthKey(r.from)) + ' · ' + rangeLabel(r.from, r.to) : rangeLabel(r.from, r.to) }),
+				]),
+				el('div', { class: 'cards three' }, [
+					statCard(t('cardMyHours'), C.formatHours(row ? row.hours : 0), 'accent'),
+					statCard(t('cardMyTips'), money(row ? row.tips : 0), ''),
+					statCard(t('colPerHour'), money(row ? row.perHourCents : 0), ''),
+				]),
+				el('p', { class: 'muted small', text: t('mineHelp') }),
+				list.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid mine-grid' }, [
+					el('thead', null, el('tr', null, [
+						el('th', { text: t('date') }),
+						el('th', { class: 'num day-col', text: '☀ ' + t('hours') }),
+						el('th', { class: 'num night-col', text: '☾ ' + t('hours') }),
+						el('th', { class: 'num', text: t('colHours') }),
+						el('th', { class: 'num', text: t('colTips') }),
+					])),
+					el('tbody', null, list.map(function (d) {
+						return el('tr', null, [
+							el('td', { class: 'name', text: niceDate(d.date, true) }),
+							el('td', { class: 'num day-col', text: d.dayHours ? C.formatHours(d.dayHours) : '–' }),
+							el('td', { class: 'num night-col', text: d.nightHours ? C.formatHours(d.nightHours) : '–' }),
+							el('td', { class: 'num strong', text: C.formatHours(d.hours) }),
+							el('td', { class: 'num', text: money(d.tips) + (missing[d.date] && d.nightHours ? ' *' : '') }),
+						]);
+					})),
+					el('tfoot', null, el('tr', null, [
+						el('th', { text: t('total') + ' (' + t('daysCount', { n: list.length }) + ')' }),
+						el('th', { class: 'num day-col', text: C.formatHours(row ? row.dayHours : 0) }),
+						el('th', { class: 'num night-col', text: C.formatHours(row ? row.nightHours : 0) }),
+						el('th', { class: 'num', text: C.formatHours(row ? row.hours : 0) }),
+						el('th', { class: 'num', text: money(row ? row.tips : 0) }),
+					])),
+				])) : el('p', { class: 'muted', text: t('noWorkInRange') }),
+				pending ? el('p', { class: 'muted small', text: t('mineMissingTotal') }) : null,
+			]);
+			return el('div', { class: 'stack' }, [controls, body]);
+		});
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -1027,6 +1148,7 @@
 			]),
 			el('ul', { class: 'facts' }, [
 				el('li', { text: t('factSplit', { pct: st.server_pct, kpct: 100 - st.server_pct }) }),
+				el('li', { text: t('factPeriods') }),
 				el('li', { text: t('factWindow', { hours: st.edit_window_hours }) }),
 				el('li', { text: t('factRetention', { months: st.retention_months }) }),
 				el('li', { text: t('factTimezone', { tz: st.timezone }) }),
@@ -1050,8 +1172,6 @@
 
 		const nameIn = el('input', { type: 'text', maxlength: 60, value: st.restaurant_name });
 		const pctIn = el('input', { type: 'number', min: 1, max: 100, step: 1, inputmode: 'numeric', value: String(st.server_pct) });
-		const anchorIn = el('input', { type: 'date', value: st.period_anchor });
-		const cur = C.periodFor(st.period_anchor, S.today);
 		const saveBtn = el('button', { type: 'submit', class: 'btn primary' }, t('save'));
 
 		parts.push(el('form', {
@@ -1059,13 +1179,13 @@
 			onsubmit: async function (ev) {
 				ev.preventDefault();
 				const pct = Number(pctIn.value);
-				if (!Number.isInteger(pct) || pct < 1 || pct > 100 || !C.isIsoDate(anchorIn.value)) {
+				if (!Number.isInteger(pct) || pct < 1 || pct > 100) {
 					toast(t('err_invalid_settings'), 'error');
 					return;
 				}
 				await busy(saveBtn, async function () {
 					try {
-						await API.rpc('update_settings', { p_token: S.token, p_restaurant_name: nameIn.value, p_server_pct: pct, p_period_anchor: anchorIn.value });
+						await API.rpc('update_settings', { p_token: S.token, p_restaurant_name: nameIn.value, p_server_pct: pct, p_period_anchor: st.period_anchor });
 						await refreshBootstrap();
 					} catch (e) {
 						handleError(e);
@@ -1079,11 +1199,6 @@
 			el('h2', { text: t('adminSettingsTitle') }),
 			el('label', { class: 'field' }, [el('span', { text: t('restaurantName') }), nameIn]),
 			el('label', { class: 'field' }, [el('span', { text: t('serverPct') }), pctIn, el('small', { class: 'muted', text: t('serverPctHelp') })]),
-			el('label', { class: 'field' }, [
-				el('span', { text: t('periodAnchor') }),
-				anchorIn,
-				el('small', { class: 'muted', text: t('periodAnchorHelp', { from: niceDate(cur.from, true), to: niceDate(cur.to, true) }) }),
-			]),
 			saveBtn,
 		]));
 

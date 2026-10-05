@@ -25,7 +25,6 @@
 	'use strict';
 
 	const SHIFTS = ['day', 'night'];
-	const PERIOD_DAYS = 14;
 	const MAX_CENTS = 100000000;
 	const MAX_SHIFT_HOURS = 2400;
 	const MAX_NAME_LENGTH = 60;
@@ -68,11 +67,25 @@
 		return Math.round((toUtcMs(b) - toUtcMs(a)) / DAY_MS);
 	}
 
-	/** The 14-day pay period (anchored on `anchor`) that contains `iso`. */
-	function periodFor(anchor, iso) {
-		const k = Math.floor(diffDays(anchor, iso) / PERIOD_DAYS);
-		const from = addDays(anchor, k * PERIOD_DAYS);
-		return { from: from, to: addDays(from, PERIOD_DAYS - 1) };
+	/**
+	 * The pay period containing `iso`. Pay periods are always the 1st–15th
+	 * and the 16th–last day of each month.
+	 */
+	function payPeriodFor(iso) {
+		const ym = iso.slice(0, 7);
+		if (+iso.slice(8, 10) <= 15) {
+			return { from: ym + '-01', to: ym + '-15' };
+		}
+		return { from: ym + '-16', to: monthRange(ym).to };
+	}
+
+	/** The pay period `n` periods before (n < 0) or after (n > 0) the one containing `iso`. */
+	function shiftPayPeriod(iso, n) {
+		let p = payPeriodFor(iso);
+		for (let i = 0; i < Math.abs(n); i++) {
+			p = payPeriodFor(n > 0 ? addDays(p.to, 1) : addDays(p.from, -1));
+		}
+		return p;
 	}
 
 	function monthKey(iso) {
@@ -245,6 +258,16 @@
 		});
 
 		const rows = {};
+		const serverDays = {}; // serverId → [{date, dayHours, nightHours, dayTips, nightTips, hours, tips}]
+		function serverDay(id, date) {
+			const list = serverDays[id] = serverDays[id] || [];
+			let d = list.length ? list[list.length - 1] : null;
+			if (!d || d.date !== date) {
+				d = { date: date, dayHours: 0, nightHours: 0, dayTips: 0, nightTips: 0, hours: 0, tips: 0 };
+				list.push(d);
+			}
+			return d;
+		}
 		function row(id) {
 			if (!rows[id]) {
 				const i = order[id];
@@ -284,8 +307,16 @@
 					entries.forEach(function (e) {
 						row(e.key)[shift + 'Hours'] += e.weight;
 						detail[shift + 'Hours'] += e.weight;
+						const sd = serverDay(e.key, d.date);
+						sd[shift + 'Hours'] += e.weight;
+						sd.hours += e.weight;
 					});
-					Object.keys(r.shares).forEach(function (id) { row(id)[shift + 'Tips'] += r.shares[id]; });
+					Object.keys(r.shares).forEach(function (id) {
+						row(id)[shift + 'Tips'] += r.shares[id];
+						const sd = serverDay(id, d.date);
+						sd[shift + 'Tips'] += r.shares[id];
+						sd.tips += r.shares[id];
+					});
 					detail.pool += r.pool;
 					detail.kitchen += r.kitchen;
 					totals[shift + 'Tips'] += r.tips;
@@ -309,18 +340,27 @@
 		totals.tips = totals.dayTips + totals.nightTips;
 		totals.perHourCents = totals.hours > 0 ? Math.round(totals.serverTips * 100 / totals.hours) : 0;
 
-		return { from: from, to: to, serverPct: pct, rows: list, days: dayList, totals: totals, warnings: warnings };
+		return {
+			from: from,
+			to: to,
+			serverPct: pct,
+			rows: list,
+			days: dayList,
+			serverDays: serverDays,
+			totals: totals,
+			warnings: warnings,
+		};
 	}
 
 	return {
 		SHIFTS: SHIFTS,
-		PERIOD_DAYS: PERIOD_DAYS,
 		MAX_NAME_LENGTH: MAX_NAME_LENGTH,
 		isIsoDate: isIsoDate,
 		toUtcMs: toUtcMs,
 		addDays: addDays,
 		diffDays: diffDays,
-		periodFor: periodFor,
+		payPeriodFor: payPeriodFor,
+		shiftPayPeriod: shiftPayPeriod,
 		monthKey: monthKey,
 		monthRange: monthRange,
 		shiftMonth: shiftMonth,

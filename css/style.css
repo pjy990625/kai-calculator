@@ -241,6 +241,15 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .stat-label { font-size: .78rem; color: var(--muted); font-weight: 600; }
 .stat-value { font-size: 1.15rem; font-weight: 800; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .stat.accent { background: var(--accent-soft); }
+.cards.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.btn.link, button.link {
+	font: inherit; font-weight: 600;
+	color: var(--accent);
+	background: none; border: 0; padding: 0;
+	text-decoration: underline; text-underline-offset: 3px;
+	cursor: pointer;
+}
+.mine-grid td, .mine-grid th { padding-left: 4px; padding-right: 4px; }
 .stat.accent .stat-value { color: var(--accent); }
 .stat.day .stat-value { color: var(--day); }
 .stat.night .stat-value { color: var(--night); }
@@ -330,6 +339,8 @@ input[type="number"], input[type="password"] {
 
 @media (max-width: 640px) {
 	.cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.cards.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+	.cards.three .stat-value { font-size: 1rem; }
 	.server-row { grid-template-columns: minmax(0, 1fr) auto; }
 	.server-row .row.tight { grid-column: 1 / -1; }
 	.tips-grid { grid-template-columns: 1fr 1fr; }
