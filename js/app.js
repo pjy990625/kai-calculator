@@ -560,9 +560,10 @@
 			foot.day.textContent = C.formatHours(f.byShift.day.reduce(function (x, e) { return x + e.weight; }, 0));
 			foot.night.textContent = C.formatHours(f.byShift.night.reduce(function (x, e) { return x + e.weight; }, 0));
 			foot.share.textContent = money(d.pool + n.pool);
+			const left = d.leftover + n.leftover;
 			splitOut.textContent = t('splitLine', {
 				pct: pct, kpct: 100 - pct, servers: money(d.pool + n.pool), kitchen: money(d.kitchen + n.kitchen),
-			});
+			}) + (left > 0 ? ' · ' + t('leftoverLine', { amount: money(left) }) : '');
 		}
 
 		async function onSave(ev) {
@@ -794,6 +795,9 @@
 		if (S.retentionStart && s.from < S.retentionStart) {
 			parts.push(el('div', { class: 'notice warn', text: t('retentionNote', { months: S.settings.retention_months, date: niceDate(S.retentionStart) }) }));
 		}
+		if (tot.leftover > 0) {
+			parts.push(el('div', { class: 'notice info', text: t('leftoverNote', { amount: money(tot.leftover) }) }));
+		}
 		s.warnings.forEach(function (w) {
 			parts.push(el('div', {
 				class: 'notice warn',
@@ -878,6 +882,7 @@
 				el('th', { class: 'num night-col', text: t('colNightTips') }),
 				el('th', { class: 'num', text: t('colServerPool', { pct: s.serverPct }) }),
 				el('th', { class: 'num', text: t('colKitchen', { pct: 100 - s.serverPct }) }),
+				el('th', { class: 'num', text: t('colLeftover') }),
 				el('th', { class: 'num day-col', text: t('colDayHours') }),
 				el('th', { class: 'num night-col', text: t('colNightHours') }),
 			])),
@@ -889,6 +894,7 @@
 					el('td', { class: 'num night-col', text: d.totalTips === null ? '—' : money(d.nightTips) }),
 					el('td', { class: 'num', text: money(d.pool) }),
 					el('td', { class: 'num', text: money(d.kitchen) }),
+					el('td', { class: 'num muted', text: d.leftover ? money(d.leftover) : '—' }),
 					el('td', { class: 'num day-col', text: C.formatHours(d.dayHours) }),
 					el('td', { class: 'num night-col', text: C.formatHours(d.nightHours) }),
 				]);
@@ -916,14 +922,14 @@
 			C.formatHours(s.totals.dayHours), '', C.formatHours(s.totals.nightHours), '']);
 		lines.push([]);
 		lines.push([t('date'), t('colTotalTips'), t('colDayTips'), t('colNightTips'),
-			t('colServerPool', { pct: s.serverPct }), t('colKitchen', { pct: 100 - s.serverPct }), t('colDayHours'), t('colNightHours')]);
+			t('colServerPool', { pct: s.serverPct }), t('colKitchen', { pct: 100 - s.serverPct }), t('colLeftover'), t('colDayHours'), t('colNightHours')]);
 		s.days.forEach(function (d) {
 			lines.push([d.date, d.totalTips === null ? '' : C.centsToPlain(d.totalTips), C.centsToPlain(d.dayTips),
 				d.totalTips === null ? '' : C.centsToPlain(d.nightTips), C.centsToPlain(d.pool), C.centsToPlain(d.kitchen),
-				C.formatHours(d.dayHours), C.formatHours(d.nightHours)]);
+				C.centsToPlain(d.leftover), C.formatHours(d.dayHours), C.formatHours(d.nightHours)]);
 		});
 		lines.push([t('total'), C.centsToPlain(s.totals.tips), C.centsToPlain(s.totals.dayTips), C.centsToPlain(s.totals.nightTips),
-			C.centsToPlain(s.totals.pool), C.centsToPlain(s.totals.kitchen), C.formatHours(s.totals.dayHours), C.formatHours(s.totals.nightHours)]);
+			C.centsToPlain(s.totals.pool), C.centsToPlain(s.totals.kitchen), C.centsToPlain(s.totals.leftover), C.formatHours(s.totals.dayHours), C.formatHours(s.totals.nightHours)]);
 		const csv = '﻿' + lines.map(function (l) { return l.map(csvCell).join(','); }).join('\r\n');
 		download('tips_' + s.from + '_' + s.to + '.csv', csv, 'text/csv;charset=utf-8');
 	}

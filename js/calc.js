@@ -12,6 +12,12 @@
  *   per shift:  servers' pool = tips × server% (default 60%)
  *               kitchen/sushi = tips − servers' pool (40%)
  *               server A      = servers' pool ÷ all servers' hours on that shift × A's hours
+ *
+ * Rounding rule (the restaurant's): each server's share is paid in WHOLE
+ * DOLLARS. Shares of .50 or more round up, largest fraction first, but only
+ * while the servers' total stays at or below the servers' pool. Servers with
+ * the same fraction (e.g. the same hours) are rounded up together or not at
+ * all. Whatever is left of the pool is reported as `leftover`.
  */
 (function (root, factory) {
 	'use strict';
@@ -196,17 +202,73 @@
 	}
 
 	/**
-	 * One shift: servers get `pct`% split by hours, the rest goes to the kitchen.
+	 * Split the servers' pool of one shift into WHOLE DOLLARS (returned in cents).
+	 *
+	 * Exact share of A = tips × pct% × A's hours ÷ all hours. Everyone first gets
+	 * the whole dollars of their exact share. Then shares whose fraction is .50
+	 * or more are rounded up, the largest fraction first, while the sum stays
+	 * <= tips × pct% (the servers' pool). People with the same fraction are one
+	 * group: if the group does not fit as a whole, nobody in it is rounded up,
+	 * and nobody with a smaller fraction is rounded up either (no one jumps the
+	 * queue). All arithmetic is in integers, so there are no float errors.
+	 *
+	 * @param {number} tips integer cents
+	 * @param {number} pct servers' percent (0–100)
+	 * @param {{key:string, weight:number}[]} entries weights (hundredths of hours) > 0
+	 * @returns {Object<string, number>} key → cents (always a multiple of 100)
+	 */
+	function splitWholeDollars(tips, pct, entries) {
+		const out = {};
+		const sumW = entries.reduce(function (a, e) { return a + e.weight; }, 0);
+		if (!entries.length || sumW <= 0) {
+			return out;
+		}
+		// Exact share in dollars = tips·pct·w / (100 cents · 100 % · sumW).
+		const den = 10000 * sumW;
+		const maxDollars = Math.floor(tips * pct / 10000); // the sum may never exceed the pool
+		let given = 0;
+		const rems = {};
+		entries.forEach(function (e) {
+			const exact = tips * pct * e.weight; // < 2^53 for realistic inputs
+			const dollars = Math.floor(exact / den);
+			out[e.key] = dollars;
+			given += dollars;
+			const rem = exact % den;
+			if (rem * 2 >= den) { // fraction >= .50 → wants to round up
+				(rems[rem] = rems[rem] || []).push(e.key);
+			}
+		});
+		let spare = maxDollars - given;
+		const groups = Object.keys(rems).map(Number).sort(function (a, b) { return b - a; });
+		for (let i = 0; i < groups.length; i++) {
+			const keys = rems[groups[i]];
+			if (keys.length > spare) {
+				break;
+			}
+			keys.forEach(function (k) { out[k] += 1; });
+			spare -= keys.length;
+		}
+		Object.keys(out).forEach(function (k) { out[k] *= 100; });
+		return out;
+	}
+
+	/**
+	 * One shift: servers get `pct`% split by hours (whole dollars, see
+	 * splitWholeDollars), the rest goes to the kitchen.
+	 *   pool = sum(shares) + leftover + unallocated, and pool + kitchen = tips.
 	 * If nobody has hours, the servers' pool is reported as `unallocated`.
 	 */
 	function splitShift(tips, pct, entries) {
 		const pool = serverPool(tips, pct);
 		const worked = entries.filter(function (e) { return e.weight > 0; });
+		const shares = worked.length ? splitWholeDollars(tips, pct, worked) : {};
+		const paid = Object.keys(shares).reduce(function (a, k) { return a + shares[k]; }, 0);
 		return {
 			tips: tips,
 			pool: pool,
 			kitchen: tips - pool,
-			shares: worked.length ? splitByWeight(pool, worked) : {},
+			shares: shares,
+			leftover: worked.length ? pool - paid : 0,
 			unallocated: worked.length ? 0 : pool,
 		};
 	}
@@ -276,7 +338,7 @@
 			return rows[id];
 		}
 
-		const totals = Object.assign(emptyTotals(), { pool: 0, kitchen: 0, unallocated: 0, serverTips: 0 });
+		const totals = Object.assign(emptyTotals(), { pool: 0, kitchen: 0, leftover: 0, unallocated: 0, serverTips: 0 });
 		const dayList = [];
 		const warnings = [];
 
@@ -292,6 +354,7 @@
 					totalTips: d.totalTips,
 					pool: 0,
 					kitchen: 0,
+					leftover: 0,
 					dayHours: 0,
 					nightHours: 0,
 				};
@@ -319,9 +382,11 @@
 					});
 					detail.pool += r.pool;
 					detail.kitchen += r.kitchen;
+					detail.leftover += r.leftover;
 					totals[shift + 'Tips'] += r.tips;
 					totals.pool += r.pool;
 					totals.kitchen += r.kitchen;
+					totals.leftover += r.leftover;
 					totals.unallocated += r.unallocated;
 					if (r.unallocated > 0) {
 						warnings.push({ type: 'noHours', date: d.date, shift: shift, cents: r.unallocated });
@@ -370,6 +435,7 @@
 		centsToPlain: centsToPlain,
 		cleanName: cleanName,
 		splitByWeight: splitByWeight,
+		splitWholeDollars: splitWholeDollars,
 		serverPool: serverPool,
 		splitShift: splitShift,
 		nightTips: nightTips,

@@ -300,6 +300,7 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 }
 .split-line { font-weight: 600; color: var(--accent); }
 .notice.lock { background: var(--surface-2); border: 1px solid var(--line); }
+.notice.info { background: var(--surface-2); border: 1px solid var(--line); font-weight: 500; }
 .entry-grid .hours-cell { width: 96px; }
 .entry-grid small { font-weight: 400; font-size: .75rem; }
 input:disabled { opacity: .65; background: var(--surface-2); }

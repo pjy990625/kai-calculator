@@ -55,7 +55,7 @@ test('serverPool is 60% rounded half-up; kitchen gets exactly the rest', () => {
 	for (let t = 0; t < 5000; t++) {
 		const s = C.splitShift(t, 60, [{ key: 'a', weight: 300 }, { key: 'b', weight: 700 }]);
 		assert.equal(s.pool + s.kitchen, t);
-		assert.equal(s.shares.a + s.shares.b, s.pool);
+		assert.equal(s.shares.a + s.shares.b + s.leftover, s.pool);
 	}
 });
 
@@ -98,9 +98,50 @@ test('two-week totals add up across days and stay exact', () => {
 		hours.push(h(date, 'a', 'day', 333), h(date, 'b', 'day', 517), h(date, 'b', 'night', 600), h(date, 'c', 'night', 425));
 	}
 	const s = C.summarize({ serverPct: 60, servers, days, hours }, '2026-09-28', '2026-10-11');
-	assert.equal(s.totals.serverTips + s.totals.kitchen, s.totals.tips);
-	assert.equal(s.rows.reduce((a, r) => a + r.tips, 0), s.totals.pool);
+	assert.equal(s.totals.serverTips + s.totals.leftover + s.totals.kitchen, s.totals.tips);
+	assert.equal(s.rows.reduce((a, r) => a + r.tips, 0), s.totals.serverTips);
+	assert.ok(s.rows.every((r) => r.dayTips % 100 === 0 && r.nightTips % 100 === 0), 'whole dollars');
+	assert.ok(s.totals.leftover >= 0);
 	assert.equal(s.days.length, 14);
+});
+
+// Exact shares in dollars → weights at pct 100 so tips (cents) = sum of weights.
+function wd(sharesCents) {
+	const entries = sharesCents.map((w, i) => ({ key: 'p' + i, weight: w }));
+	const tips = sharesCents.reduce((a, b) => a + b, 0);
+	const out = C.splitWholeDollars(tips, 100, entries);
+	return entries.map((e) => out[e.key] / 100);
+}
+
+test("rounding rule: 50.50 / 60.70 / 60.70 / 40.10 → round the 60.70s up, total never above the pool", () => {
+	// Pool $212.00. Rounding all of .50+ up would pay 51+61+61+40 = 213 > 212.
+	assert.deepEqual(wd([5050, 6070, 6070, 4010]), [50, 61, 61, 40]);
+});
+
+test('rounding rule: same fraction (same hours) → both up or neither', () => {
+	// Pool $211.90 → at most $211; only $1 spare but two people tie at .70 → nobody goes up.
+	assert.deepEqual(wd([5040, 6070, 6070, 4010]), [50, 60, 60, 40]);
+	// A smaller fraction (50.50) never jumps ahead of a tied group that did not fit.
+	assert.deepEqual(wd([5050, 6070, 6070, 4000]), [50, 60, 60, 40]);
+	// Below .50 always rounds down, even when there is room.
+	assert.deepEqual(wd([5040, 5040, 20]), [50, 50, 0]); // pool $101, $1 left over
+});
+
+test('rounding rule: whole dollars, never above the pool, through splitShift', () => {
+	for (let tips = 0; tips < 60000; tips += 137) {
+		const entries = [{ key: 'a', weight: 333 }, { key: 'b', weight: 333 }, { key: 'c', weight: 517 }, { key: 'd', weight: 50 }];
+		const r = C.splitShift(tips, 60, entries);
+		const paid = Object.values(r.shares).reduce((a, b) => a + b, 0);
+		assert.ok(Object.values(r.shares).every((c) => c % 100 === 0), 'whole dollars');
+		assert.ok(paid * 100 <= tips * 60, 'never above 60% of the tips');
+		assert.equal(r.shares.a, r.shares.b, 'same hours → same pay');
+		assert.equal(paid + r.leftover + r.kitchen, tips);
+		// Each person is within $1 of their exact share, and rounding only goes up from .50.
+		for (const e of entries) {
+			const exact = tips * 60 * e.weight / 100 / 1233;
+			assert.ok(r.shares[e.key] <= Math.round(exact / 100) * 100 && r.shares[e.key] >= Math.floor(exact / 100) * 100);
+		}
+	}
 });
 
 test('missing whole-day total and tips with no hours are warned, never lost', () => {
