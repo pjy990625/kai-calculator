@@ -163,6 +163,7 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 	border-radius: var(--radius-sm);
 	padding: 9px 14px;
 	min-height: 40px;
+	white-space: nowrap; /* "오늘" must not break into "오 / 늘" */
 	cursor: pointer;
 }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
@@ -171,6 +172,10 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 .btn.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
 .btn.ghost.danger { border-color: transparent; }
 .btn.small { padding: 4px 10px; min-height: 32px; font-size: .85rem; }
+/* Phones / touch screens: every small button at least 40×40 for fingers. */
+@media (pointer: coarse) {
+	.btn.small, .row.nav .btn { min-height: 40px; min-width: 40px; }
+}
 
 .segmented {
 	display: inline-flex;
@@ -364,4 +369,10 @@ input[type="number"], input[type="password"] {
 	.table-wrap { overflow: visible; }
 	main { padding: 0; }
 	.sub-report { break-inside: avoid; }
+}
+
+/* Touch screens (must come after the base rules it overrides). */
+@media (pointer: coarse) {
+	.segmented button { min-height: 40px; }
+	.btn.link, button.link { padding: 10px 0; margin: -10px 0; }
 }
