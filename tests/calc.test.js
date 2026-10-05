@@ -23,6 +23,11 @@ test('parseMoney', () => {
 	assert.equal(C.parseMoney('abc'), null);
 	assert.equal(C.parseMoney('1.234'), null);
 	assert.equal(C.parseMoney('-5'), null);
+	// Phone keyboards that type a comma as the decimal point
+	assert.equal(C.parseMoney('12,50'), 1250);
+	assert.equal(C.parseMoney('12,5'), 1250);
+	assert.equal(C.parseMoney('1,234'), 123400);
+	assert.equal(C.parseMoney('12,345.67'), 1234567);
 });
 
 test('parseHours / formatHours', () => {

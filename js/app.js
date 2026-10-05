@@ -10,6 +10,19 @@
 (function () {
 	'use strict';
 
+	// Older phones (iOS < 14, Chrome < 86) lack Element.replaceChildren.
+	if (!Element.prototype.replaceChildren) {
+		Element.prototype.replaceChildren = function () {
+			while (this.firstChild) {
+				this.removeChild(this.firstChild);
+			}
+			for (let i = 0; i < arguments.length; i++) {
+				const n = arguments[i];
+				this.appendChild(typeof n === 'string' ? document.createTextNode(n) : n);
+			}
+		};
+	}
+
 	const C = window.KaiCalc;
 	const I = window.KaiI18n;
 	const API = window.KaiApi;
@@ -645,6 +658,8 @@
 							if (C.isIsoDate(e.target.value)) {
 								S.entryDate = e.target.value;
 								render();
+							} else {
+								e.target.value = date; // iOS "Clear" leaves it empty
 							}
 						},
 					}),

@@ -135,6 +135,7 @@ fieldset.field { border: 0; padding: 0; }
 
 input[type="text"], input[type="date"], select {
 	font: inherit;
+	font-size: 16px; /* below 16px, iPhone Safari zooms in on focus */
 	color: inherit;
 	background: var(--surface);
 	border: 1px solid var(--line);
@@ -245,7 +246,8 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .btn.link, button.link {
 	font: inherit; font-weight: 600;
 	color: var(--accent);
-	background: none; border: 0; padding: 0;
+	background: none; border: 0;
+	padding: 8px 0; margin: -8px 0; /* bigger tap area on phones, same row height */
 	text-decoration: underline; text-underline-offset: 3px;
 	cursor: pointer;
 }
@@ -311,6 +313,7 @@ tr.clickable:hover td { background: var(--surface-2); }
 .facts li { margin: 2px 0; }
 input[type="number"], input[type="password"] {
 	font: inherit; color: inherit;
+	font-size: 16px; /* below 16px, iPhone Safari zooms in on focus */
 	background: var(--surface);
 	border: 1px solid var(--line);
 	border-radius: var(--radius-sm);

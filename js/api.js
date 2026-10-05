@@ -40,15 +40,16 @@
 	}
 
 	async function rpc(fn, args) {
-		const ctrl = new AbortController();
-		const timer = setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS);
+		// AbortController is missing on very old phones (iOS < 12.1); they just get no timeout.
+		const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+		const timer = ctrl ? setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS) : null;
 		let res;
 		try {
 			res = await fetch(BASE + '/rest/v1/rpc/' + encodeURIComponent(fn), {
 				method: 'POST',
 				headers: headers(),
 				body: JSON.stringify(args || {}),
-				signal: ctrl.signal,
+				signal: ctrl ? ctrl.signal : undefined,
 				cache: 'no-store',
 			});
 		} catch (e) {

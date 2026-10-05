@@ -117,6 +117,16 @@
 6. **내 시간** 탭 → 내 이름 선택 (휴대폰이 기억함) → 날짜별 ☀/☾ 근무시간, 합계, 받을 팁
    - 종이에 적은 시간과 다르면 입력한 사람에게 알려서 고치세요.
 
+## 지원 휴대폰
+
+- **아이폰**: iOS 12 이상 Safari / Chrome
+- **안드로이드**: Chrome, 삼성 인터넷 등 최근 브라우저
+- 홈 화면에 추가하면 초록색 **K** 아이콘으로 바로 열 수 있습니다
+  - 아이폰: Safari 공유 버튼 → 홈 화면에 추가
+  - 안드로이드: Chrome 메뉴(⋮) → 홈 화면에 추가
+- 입력칸을 눌러도 아이폰에서 화면이 확대되지 않게 했고, 쉼표 소수점(12,50)도 $12.50으로 인식합니다.
+- 최종 점검 방법은 [`docs/browser-check-prompt.md`](docs/browser-check-prompt.md)를 보세요.
+
 ## 보안 메모
 
 - 직원 PIN이 4자리면 경우의 수가 1만 개뿐입니다. 그래서 틀린 시도가
@@ -137,6 +147,7 @@
 
 ```
 index.html              페이지 뼈대
+manifest.webmanifest    홈 화면 아이콘 설정 (icons/)
 css/style.css           스타일 (다크 모드, 모바일, 인쇄)
 js/config.js            Supabase URL + publishable key (공개값)
 js/api.js               Supabase RPC 호출 (fetch, 라이브러리 없음)

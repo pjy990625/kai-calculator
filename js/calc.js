@@ -116,11 +116,14 @@
 	/* ------------------------------------------------------------------ */
 
 	/**
-	 * "1,234.56" / "$80" / "80.5" → cents. Commas are thousands separators.
+	 * "1,234.56" / "$80" / "80.5" → cents. Commas are thousands separators,
+	 * except "12,5" / "12,50" (a comma followed by 1–2 digits and no dot),
+	 * which some phone keyboards type as the decimal point.
 	 * Returns null for empty or invalid input.
 	 */
 	function parseMoney(input) {
-		const s = String(input == null ? '' : input).trim().replace(/[\s$,]/g, '');
+		let s = String(input == null ? '' : input).trim().replace(/[\s$]/g, '');
+		s = /^\d*,\d{1,2}$/.test(s) ? s.replace(',', '.') : s.replace(/,/g, '');
 		const m = /^(\d+)(?:\.(\d{0,2}))?$/.exec(s) || /^()\.(\d{1,2})$/.exec(s);
 		if (!m) {
 			return null;
