@@ -166,6 +166,35 @@
 	}
 
 	/* ------------------------------------------------------------------ */
+	/* Server order — always alphabetical                                  */
+	/* ------------------------------------------------------------------ */
+
+	// One fixed rule for every phone, whatever its language: upper/lower case
+	// does not matter, "Server 2" comes before "Server 10", English names come
+	// before Korean names, and Korean names are in 가나다 order.
+	const NAME_COLLATOR = typeof Intl === 'object' && typeof Intl.Collator === 'function'
+		? new Intl.Collator('en', { sensitivity: 'base', numeric: true })
+		: null;
+
+	function compareNames(a, b) {
+		const x = String(a == null ? '' : a);
+		const y = String(b == null ? '' : b);
+		const c = NAME_COLLATOR ? NAME_COLLATOR.compare(x, y) : x.toLowerCase().localeCompare(y.toLowerCase());
+		// Names that differ only by case/accents still need a stable order.
+		return c !== 0 ? c : (x < y ? -1 : (x > y ? 1 : 0));
+	}
+
+	/**
+	 * A copy of `servers` in alphabetical order. A new or renamed server simply
+	 * takes its place by name — there is no manual order to keep up to date.
+	 */
+	function sortServers(servers) {
+		return servers.slice().sort(function (a, b) {
+			return compareNames(a.name, b.name) || (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0));
+		});
+	}
+
+	/* ------------------------------------------------------------------ */
 	/* Splitting                                                           */
 	/* ------------------------------------------------------------------ */
 
@@ -274,6 +303,9 @@
 
 	/**
 	 * Per-server totals and per-day details for [from, to] (inclusive).
+	 *
+	 * Rows come out in the order of `input.servers` (the app passes them
+	 * alphabetically, see sortServers); servers that no longer exist come last.
 	 *
 	 * @param {{serverPct:number, servers:{id,name}[], days:{date,dayTips,totalTips}[],
 	 *          hours:{date,serverId,shift,hundredths}[]}} input
@@ -415,6 +447,8 @@
 		formatHours: formatHours,
 		centsToPlain: centsToPlain,
 		cleanName: cleanName,
+		compareNames: compareNames,
+		sortServers: sortServers,
 		sumWeights: sumWeights,
 		splitWholeDollars: splitWholeDollars,
 		serverPool: serverPool,

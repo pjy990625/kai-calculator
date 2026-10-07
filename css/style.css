@@ -209,7 +209,13 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .report-grid .day-col { color: var(--day); }
 .report-grid .night-col { color: var(--night); }
 .report-grid thead .day-col, .report-grid thead .night-col { opacity: .85; }
-.entry-grid .hours-cell { width: 110px; }
+/* Daily entry: column widths are fixed, so the hours column stays where it is
+   when the tips column fills in while hours are typed. */
+.entry-grid { table-layout: fixed; }
+.entry-grid .col-hours { width: 96px; }
+.entry-grid .col-share { width: 11.5rem; }
+.entry-grid thead th { white-space: normal; }
+.entry-grid .name { overflow-wrap: anywhere; }
 .entry-grid .hours-cell input { text-align: right; }
 .entry-grid .share { font-weight: 700; }
 
@@ -279,6 +285,9 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	border-bottom: 1px solid var(--line);
 }
 .server-row.is-inactive input { color: var(--muted); }
+/* A server that was just added or renamed: it lands in alphabetical order, so flash it. */
+.server-row.is-new { animation: row-flash 2.5s ease-out; scroll-margin: 96px 0 24px; }
+@keyframes row-flash { from { background: var(--accent-soft); } to { background: transparent; } }
 
 /* Login */
 
@@ -291,7 +300,26 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 
 .date-input { width: auto; min-height: 36px; padding: 4px 8px; }
 .row.date-nav { gap: 4px; flex-wrap: nowrap; }
-.tips-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+/* Day tips / Night tips tabs inside the card. */
+.shift-tabs {
+	display: grid; grid-template-columns: 1fr 1fr; gap: 2px;
+	margin: 8px 0 12px; padding: 3px;
+	background: var(--surface-2);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-sm);
+}
+.shift-tab {
+	font: inherit; font-weight: 700;
+	border: 0; background: none; color: var(--muted);
+	min-height: 40px; padding: 6px 8px;
+	border-radius: 6px;
+	cursor: pointer;
+}
+.shift-tab.is-on { background: var(--surface); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
+.shift-tab.day.is-on { color: var(--day); }
+.shift-tab.night.is-on { color: var(--night); }
+.shift-panel[hidden] { display: none; }
+.tips-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: end; max-width: 560px; }
 .tips-grid input { font-size: 1.15rem; font-weight: 700; }
 .computed {
 	display: flex; align-items: center;
@@ -301,11 +329,12 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	font-size: 1.15rem; font-weight: 700;
 	font-variant-numeric: tabular-nums;
 }
-.split-line { font-weight: 600; color: var(--accent); }
+.split-line { font-weight: 600; color: var(--accent); min-height: 1.5em; margin: 0 0 4px; } /* height kept while empty */
 .notice.lock, .notice.info { background: var(--surface-2); border: 1px solid var(--line); }
 .notice.info { font-weight: 500; }
-.entry-grid .hours-cell { width: 96px; }
 .entry-grid small { font-weight: 400; font-size: .75rem; }
+.entry-grid small .part { white-space: nowrap; }
+.notice[hidden] { display: none; }
 input:disabled { opacity: .65; background: var(--surface-2); }
 tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--surface-2); }
@@ -340,9 +369,11 @@ tr.clickable:hover td { background: var(--surface-2); }
 	.cards.three .stat-value { font-size: 1rem; }
 	.server-row { grid-template-columns: minmax(0, 1fr) auto; }
 	.server-row .row.tight { grid-column: 1 / -1; }
-	.tips-grid { grid-template-columns: 1fr 1fr; }
-	.tips-grid > :last-child { grid-column: 1 / -1; }
-	.entry-grid .hours-cell { width: 72px; }
+	.entry-grid .col-hours { width: 76px; }
+	.entry-grid .col-share { width: 8.25rem; }
+	/* "Day $71.00" and "Night $10.00" on two lines instead of a line broken at the dot. */
+	.entry-grid small .part { display: block; }
+	.entry-grid small .sep { display: none; }
 	.report-head h2 { font-size: 1.2rem; }
 }
 

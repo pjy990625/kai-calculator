@@ -2,8 +2,8 @@
  * Kai Calculator — UI.
  *
  * Talks to Supabase only through window.KaiApi (js/api.js). All permission
- * rules (PIN, 24h lock, admin-only actions) are enforced by the database;
- * the checks here only decide what to show.
+ * rules (PIN, staff can only change today's record, admin-only actions) are
+ * enforced by the database; the checks here only decide what to show.
  *
  * All user-provided text is inserted with textContent (via el()), never innerHTML.
  */
@@ -26,6 +26,7 @@
 		servers: [],
 		tab: 'entry',
 		entryDate: null,
+		entryShift: 'day', // which tab of the daily entry card is open: 'day' | 'night'
 		reportKind: 'period',
 		reportDate: null,
 		mineId: null,
@@ -132,14 +133,6 @@
 			.format(new Date(C.toUtcMs(ym + '-01')));
 	}
 
-	/** A timestamp shown in the restaurant's time zone. */
-	function niceTime(ts) {
-		return new Intl.DateTimeFormat(locale(), {
-			weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-			timeZone: S.settings ? S.settings.timezone : undefined,
-		}).format(new Date(ts));
-	}
-
 	function toast(msg, kind) {
 		const box = document.getElementById('toast');
 		const item = el('div', { class: 'toast ' + (kind || 'ok'), role: 'status', text: msg });
@@ -219,7 +212,7 @@
 		S.today = b.today;
 		S.retentionStart = b.retention_start;
 		S.settings = b.settings;
-		S.servers = b.servers || [];
+		S.servers = C.sortServers(b.servers || []); // always alphabetical
 		if (!S.entryDate) {
 			S.entryDate = S.today;
 		}
@@ -358,7 +351,6 @@
 					dayTips: Number(d.day_tips_cents),
 					totalTips: d.total_tips_cents === null ? null : Number(d.total_tips_cents),
 					editable: d.editable === true,
-					editUntil: d.edit_until,
 				};
 			}),
 			hours: range.hours.map(function (h) {
@@ -435,7 +427,8 @@
 	}
 
 	/* ------------------------------------------------------------------ */
-	/* Entry tab — one date: day tips, whole-day total, everyone's hours   */
+	/* Entry tab — one date. Day tips and night tips each have their own   */
+	/* tab inside the card, and each shift is saved separately.            */
 	/* ------------------------------------------------------------------ */
 
 	/** Why the selected date can't be edited (null = editable). */
@@ -446,13 +439,10 @@
 		if (S.retentionStart && date < S.retentionStart) {
 			return t('lockTooOld');
 		}
-		if (rec) {
-			return rec.editable ? null : t('lockAdminOnly', { hours: S.settings.edit_window_hours });
-		}
-		if (isAdmin() || date >= C.addDays(S.today, -1)) {
-			return null;
-		}
-		return t('lockStaffOldDate');
+		// Saved records: the database says. New records follow the same rule —
+		// staff only on that date itself (until 11:59 PM), the admin any time.
+		const editable = rec ? rec.editable : (isAdmin() || date === S.today);
+		return editable ? null : t('lockClosed');
 	}
 
 	function renderEntryTab(seq) {
@@ -480,40 +470,72 @@
 			return s.active || myHours.some(function (h) { return h.serverId === s.id; });
 		});
 
+		// Which tab has been typed in since the form was drawn.
+		const dirty = { day: false, night: false };
+		function onInput(shift) {
+			return function () {
+				dirty[shift] = true;
+				update();
+			};
+		}
+
 		const dayTipsInput = el('input', {
 			id: 'day-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0.00',
-			value: rec ? C.centsToPlain(rec.dayTips) : '', disabled: !!locked, oninput: update,
+			value: rec ? C.centsToPlain(rec.dayTips) : '', disabled: !!locked, oninput: onInput('day'),
 		});
 		const totalInput = el('input', {
 			id: 'total-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: t('totalPlaceholder'),
-			value: rec && rec.totalTips !== null ? C.centsToPlain(rec.totalTips) : '', disabled: !!locked, oninput: update,
+			value: rec && rec.totalTips !== null ? C.centsToPlain(rec.totalTips) : '', disabled: !!locked, oninput: onInput('night'),
 		});
 		const nightOut = el('output', { id: 'night-tips', class: 'computed' }, '—');
-		const splitOut = el('p', { class: 'split-line' });
+		// Shown on a saved day for as long as the whole-day total is still empty.
+		const totalHint = rec && !locked ? el('p', { class: 'notice warn', text: t('totalMissingHint') }) : null;
 
-		const inputs = {};
-		const shareCells = {};
-		const rows = servers.map(function (s) {
-			inputs[s.id] = {};
-			C.SHIFTS.forEach(function (shift) {
-				inputs[s.id][shift] = el('input', {
-					type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0',
-					'aria-label': s.name + ' ' + t(shift) + ' ' + t('hours'),
-					value: savedHours(s.id, shift), disabled: !!locked, oninput: update,
-				});
-			});
-			shareCells[s.id] = el('td', { class: 'num share' }, '—');
-			return el('tr', null, [
-				el('td', { class: 'name' }, [s.name, s.active ? null : el('span', { class: 'tag', text: t('inactiveTag') })]),
-				el('td', { class: 'hours-cell' }, inputs[s.id].day),
-				el('td', { class: 'hours-cell' }, inputs[s.id].night),
-				shareCells[s.id],
-			]);
+		const inputs = { day: {}, night: {} };     // inputs[shift][serverId] → hours field
+		const shareCells = { day: {}, night: {} }; // shareCells[shift][serverId] → tips cell
+		const foot = {};
+		const leftoverOut = {};
+		C.SHIFTS.forEach(function (shift) {
+			foot[shift] = { hours: el('th', { class: 'num' }, '0'), share: el('th', { class: 'num' }, '—') };
+			leftoverOut[shift] = el('p', { class: 'split-line' });
 		});
-		const foot = { day: el('th', { class: 'num' }, '0'), night: el('th', { class: 'num' }, '0'), share: el('th', { class: 'num' }, '—') };
+
+		/** One tab's table: server, hours for that shift, tips. */
+		function hoursTable(shift, shareLabel) {
+			if (!servers.length) {
+				return el('p', { class: 'notice warn' }, [
+					t('noServersYet') + ' ',
+					el('button', { type: 'button', class: 'btn small', onclick: function () { S.tab = 'staff'; render(); } }, t('goToServers')),
+				]);
+			}
+			const icon = 'day' === shift ? '☀ ' : '☾ ';
+			return el('div', { class: 'table-wrap' }, el('table', { class: 'grid entry-grid' }, [
+				// Fixed column widths: typing hours must never move the hours column.
+				el('colgroup', null, [el('col', { class: 'col-name' }), el('col', { class: 'col-hours' }), el('col', { class: 'col-share' })]),
+				el('thead', null, el('tr', null, [
+					el('th', { text: t('server') }),
+					el('th', { text: icon + t('hours') }),
+					el('th', { class: 'num', text: shareLabel }),
+				])),
+				el('tbody', null, servers.map(function (s) {
+					inputs[shift][s.id] = el('input', {
+						type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0',
+						'aria-label': s.name + ' ' + t(shift) + ' ' + t('hours'),
+						value: savedHours(s.id, shift), disabled: !!locked, oninput: onInput(shift),
+					});
+					shareCells[shift][s.id] = el('td', { class: 'num share' }, '—');
+					return el('tr', null, [
+						el('td', { class: 'name' }, [s.name, s.active ? null : el('span', { class: 'tag', text: t('inactiveTag') })]),
+						el('td', { class: 'hours-cell' }, inputs[shift][s.id]),
+						shareCells[shift][s.id],
+					]);
+				})),
+				el('tfoot', null, el('tr', null, [el('th', { text: t('total') }), foot[shift].hours, foot[shift].share])),
+			]));
+		}
 
 		function readForm() {
-			const out = { bad: [], hours: [], byShift: { day: [], night: [] } };
+			const out = { bad: { day: [], night: [] }, hours: { day: [], night: [] }, weights: { day: [], night: [] } };
 			const dayRaw = dayTipsInput.value.trim();
 			const totalRaw = totalInput.value.trim();
 			out.dayTips = dayRaw === '' ? null : C.parseMoney(dayRaw);
@@ -522,19 +544,17 @@
 			out.totalInvalid = totalRaw !== '' && (out.totalTips === null || (out.dayTips !== null && out.totalTips < out.dayTips));
 			dayTipsInput.classList.toggle('invalid', out.dayTipsInvalid);
 			totalInput.classList.toggle('invalid', out.totalInvalid);
-			servers.forEach(function (s) {
-				C.SHIFTS.forEach(function (shift) {
-					const field = inputs[s.id][shift];
+			C.SHIFTS.forEach(function (shift) {
+				servers.forEach(function (s) {
+					const field = inputs[shift][s.id];
 					const raw = field.value.trim();
 					const v = raw === '' ? 0 : C.parseHours(raw);
 					field.classList.toggle('invalid', v === null);
 					if (v === null) {
-						if (out.bad.indexOf(s.name) < 0) {
-							out.bad.push(s.name);
-						}
+						out.bad[shift].push(s.name);
 					} else if (v > 0) {
-						out.hours.push({ server_id: s.id, shift: shift, hundredths: v });
-						out.byShift[shift].push({ key: s.id, weight: v });
+						out.hours[shift].push({ server_id: s.id, hundredths: v });
+						out.weights[shift].push({ key: s.id, weight: v });
 					}
 				});
 			});
@@ -543,70 +563,117 @@
 
 		function update() {
 			const f = readForm();
-			foot.day.textContent = C.formatHours(C.sumWeights(f.byShift.day));
-			foot.night.textContent = C.formatHours(C.sumWeights(f.byShift.night));
-			if (f.dayTipsInvalid || f.totalInvalid) {
-				// Don't show amounts computed from a half-typed / wrong number.
-				nightOut.textContent = '—';
-				servers.forEach(function (s) { shareCells[s.id].replaceChildren('—'); });
-				foot.share.textContent = '—';
-				splitOut.textContent = '';
-				return;
-			}
+			C.SHIFTS.forEach(function (shift) {
+				foot[shift].hours.textContent = C.formatHours(C.sumWeights(f.weights[shift]));
+			});
+			// Don't show amounts computed from a half-typed / wrong number.
+			const dayOk = !f.dayTipsInvalid;
+			const nightOk = dayOk && !f.totalInvalid;
 			const dayTips = f.dayTips || 0;
 			const night = f.totalTips !== null ? f.totalTips - dayTips : null;
-			nightOut.textContent = night === null ? '—' : money(night);
-			const d = C.splitShift(dayTips, pct, f.byShift.day);
-			const n = C.splitShift(night && night > 0 ? night : 0, pct, f.byShift.night);
+			const d = C.splitShift(dayTips, pct, f.weights.day);
+			const n = C.splitShift(night && night > 0 ? night : 0, pct, f.weights.night);
+
+			// ☀ tab: each server's tips for the day shift.
+			servers.forEach(function (s) {
+				const a = d.shares[s.id] || 0;
+				shareCells.day[s.id].replaceChildren(dayOk && a ? el('strong', { text: money(a) }) : '—');
+			});
+			foot.day.share.textContent = dayOk ? money(d.paid) : '—';
+			leftoverOut.day.textContent = dayOk && d.leftover > 0 ? t('leftoverLine', { amount: money(d.leftover) }) : '';
+
+			// ☾ tab: each server's tips for the WHOLE day (day + night).
+			nightOut.textContent = nightOk && night !== null ? money(night) : '—';
+			if (totalHint) {
+				totalHint.hidden = totalInput.value.trim() !== '';
+			}
 			servers.forEach(function (s) {
 				const a = d.shares[s.id] || 0;
 				const b = n.shares[s.id] || 0;
-				shareCells[s.id].replaceChildren();
-				appendChildren(shareCells[s.id], [
-					a + b ? el('strong', { text: money(a + b) }) : '—',
-					a && b ? el('small', { class: 'muted block', text: t('day') + ' ' + money(a) + ' · ' + t('night') + ' ' + money(b) }) : null,
-				]);
+				const cell = shareCells.night[s.id];
+				if (!nightOk || !(a + b)) {
+					cell.replaceChildren('—');
+					return;
+				}
+				cell.replaceChildren(el('strong', { text: money(a + b) }));
+				if (a) {
+					cell.appendChild(el('small', { class: 'muted block' }, [
+						el('span', { class: 'part', text: t('day') + ' ' + money(a) }),
+						el('span', { class: 'sep', text: ' · ' }),
+						el('span', { class: 'part', text: t('night') + ' ' + money(b) }),
+					]));
+				}
 			});
-			foot.share.textContent = money(d.paid + n.paid); // what servers actually receive, like the report
+			foot.night.share.textContent = nightOk ? money(d.paid + n.paid) : '—'; // what servers actually receive, like the report
 			const left = d.leftover + n.leftover;
-			splitOut.textContent = t('splitLine', {
-				pct: pct, kpct: 100 - pct, servers: money(d.pool + n.pool), kitchen: money(d.kitchen + n.kitchen),
-			}) + (left > 0 ? ' · ' + t('leftoverLine', { amount: money(left) }) : '');
+			leftoverOut.night.textContent = nightOk && left > 0 ? t('leftoverLine', { amount: money(left) }) : '';
+		}
+
+		function firstBadHours(shift) {
+			const bad = servers.find(function (s) { return inputs[shift][s.id].classList.contains('invalid'); });
+			return bad ? inputs[shift][bad.id] : null;
+		}
+
+		/** The first problem in one tab ({msg, focus}), or null. `saving` = which tabs are about to be saved. */
+		function problemIn(shift, f, saving) {
+			if ('day' === shift) {
+				if (f.dayTips === null || f.dayTipsInvalid) {
+					return { msg: t('errDayTips'), focus: dayTipsInput };
+				}
+				if (f.bad.day.length) {
+					return { msg: t('errBadHours', { names: f.bad.day.join(', ') }), focus: firstBadHours('day') };
+				}
+				if (f.dayTips > 0 && !f.weights.day.length) {
+					return { msg: t('errDayNoHours') };
+				}
+				// The whole-day total (other tab) stays as saved, so day tips have to fit under it.
+				if (!saving.night && f.totalTips !== null && f.totalTips < f.dayTips) {
+					return { msg: t('errDayOverTotal', { total: money(f.totalTips) }), focus: dayTipsInput };
+				}
+				return null;
+			}
+			if (f.totalInvalid) {
+				return { msg: t('errTotalTips'), focus: totalInput };
+			}
+			if (f.bad.night.length) {
+				return { msg: t('errBadHours', { names: f.bad.night.join(', ') }), focus: firstBadHours('night') };
+			}
+			if (f.totalTips !== null && f.totalTips - (f.dayTips || 0) > 0 && !f.weights.night.length) {
+				return { msg: t('errNightNoHours') };
+			}
+			return null;
 		}
 
 		async function onSave(ev) {
 			ev.preventDefault();
 			const f = readForm();
-			if (f.dayTips === null || f.dayTipsInvalid) {
-				toast(t('errDayTips'), 'error');
-				dayTipsInput.focus();
-				return;
-			}
-			if (f.totalInvalid) {
-				toast(t('errTotalTips'), 'error');
-				totalInput.focus();
-				return;
-			}
-			if (f.bad.length) {
-				toast(t('errBadHours', { names: f.bad.join(', ') }), 'error');
-				return;
-			}
-			if (f.dayTips > 0 && !f.byShift.day.length) {
-				toast(t('errDayNoHours'), 'error');
-				return;
-			}
-			if (f.totalTips !== null && f.totalTips - f.dayTips > 0 && !f.byShift.night.length) {
-				toast(t('errNightNoHours'), 'error');
-				return;
+			const active = S.entryShift;
+			const other = 'day' === active ? 'night' : 'day';
+			// Save the tab on screen — and the other one too if something was typed
+			// there, so nothing typed is lost. A tab nobody touched is NOT sent: the
+			// database keeps what it has (maybe newer, from another phone).
+			const saving = { day: 'day' === active || dirty.day, night: 'night' === active || dirty.night };
+			const order = [active, other];
+			for (let i = 0; i < order.length; i++) {
+				const problem = saving[order[i]] ? problemIn(order[i], f, saving) : null;
+				if (problem) {
+					showShift(order[i]); // the problem may be on the tab that is not on screen
+					toast(problem.msg, 'error');
+					if (problem.focus) {
+						problem.focus.focus();
+					}
+					return;
+				}
 			}
 			await busy(saveBtn, async function () {
 				try {
-					await API.rpc('save_day', {
+					await API.rpc('save_shifts', {
 						p_token: S.token,
 						p_date: date,
-						p_day_tips_cents: f.dayTips,
-						p_total_tips_cents: f.totalTips,
-						p_hours: f.hours,
+						p_day_tips_cents: saving.day ? f.dayTips : null,
+						p_day_hours: saving.day ? f.hours.day : null,
+						p_total_tips_cents: saving.night ? f.totalTips : null,
+						p_night_hours: saving.night ? f.hours.night : null,
 					});
 				} catch (e) {
 					handleError(e);
@@ -633,14 +700,46 @@
 
 		const saveBtn = el('button', { type: 'submit', class: 'btn primary' }, t('save'));
 
-		let status;
-		if (locked) {
-			status = el('p', { class: 'notice lock', text: '🔒 ' + locked });
-		} else if (rec && rec.editUntil) {
-			status = el('p', { class: 'status editing', text: t('editableUntil', { time: niceTime(rec.editUntil) }) });
-		} else {
-			status = el('p', { class: 'status', text: rec ? t('editingExisting') : t('newRecord') });
+		const status = locked
+			? el('p', { class: 'notice lock', text: '🔒 ' + locked })
+			: el('p', { class: 'status', text: rec ? t('editingExisting') : t('newRecord') });
+
+		// The two tabs. Both panels stay in the page (one hidden), so switching
+		// tabs never throws away what was typed.
+		const tabButtons = {};
+		const panels = {
+			day: el('div', { id: 'shift-panel-day', class: 'shift-panel', role: 'tabpanel', 'aria-labelledby': 'shift-tab-day' }, [
+				el('div', { class: 'tips-grid' }, [
+					el('label', { class: 'field' }, [el('span', { text: '☀ ' + t('dayTips') }), dayTipsInput]),
+				]),
+				leftoverOut.day,
+				hoursTable('day', t('share')),
+			]),
+			night: el('div', { id: 'shift-panel-night', class: 'shift-panel', role: 'tabpanel', 'aria-labelledby': 'shift-tab-night' }, [
+				el('div', { class: 'tips-grid' }, [
+					el('label', { class: 'field' }, [el('span', { text: t('totalTips') }), totalInput]),
+					el('div', { class: 'field' }, [el('span', { text: '☾ ' + t('nightTipsAuto') }), nightOut]),
+				]),
+				totalHint,
+				leftoverOut.night,
+				hoursTable('night', t('shareWholeDay')),
+			]),
+		};
+		function showShift(shift) {
+			S.entryShift = shift;
+			C.SHIFTS.forEach(function (k) {
+				const on = k === shift;
+				tabButtons[k].classList.toggle('is-on', on);
+				tabButtons[k].setAttribute('aria-selected', on ? 'true' : 'false');
+				panels[k].hidden = !on;
+			});
 		}
+		C.SHIFTS.forEach(function (k) {
+			tabButtons[k] = el('button', {
+				type: 'button', role: 'tab', id: 'shift-tab-' + k, class: 'shift-tab ' + k, 'aria-controls': 'shift-panel-' + k,
+				onclick: function () { showShift(k); },
+			}, 'day' === k ? '☀ ' + t('dayTips') : '☾ ' + t('nightTips'));
+		});
 
 		const form = el('form', { class: 'card', onsubmit: onSave, novalidate: true }, [
 			el('div', { class: 'row between' }, [
@@ -663,32 +762,16 @@
 				]),
 			]),
 			status,
-			el('div', { class: 'tips-grid' }, [
-				el('label', { class: 'field' }, [el('span', { text: '☀ ' + t('dayTips') }), dayTipsInput]),
-				el('label', { class: 'field' }, [el('span', { text: t('totalTips') }), totalInput]),
-				el('div', { class: 'field' }, [el('span', { text: '☾ ' + t('nightTipsAuto') }), nightOut]),
-			]),
-			rec && rec.totalTips === null && !locked ? el('p', { class: 'notice warn', text: t('totalMissingHint') }) : null,
-			splitOut,
-			servers.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid entry-grid' }, [
-				el('thead', null, el('tr', null, [
-					el('th', { text: t('server') }),
-					el('th', { text: '☀ ' + t('hours') }),
-					el('th', { text: '☾ ' + t('hours') }),
-					el('th', { class: 'num', text: t('share') }),
-				])),
-				el('tbody', null, rows),
-				el('tfoot', null, el('tr', null, [el('th', { text: t('total') }), foot.day, foot.night, foot.share])),
-			])) : el('p', { class: 'notice warn' }, [
-				t('noServersYet') + ' ',
-				el('button', { type: 'button', class: 'btn small', onclick: function () { S.tab = 'staff'; render(); } }, t('goToServers')),
-			]),
+			el('div', { class: 'shift-tabs', role: 'tablist', 'aria-label': t('entryTitle') }, [tabButtons.day, tabButtons.night]),
+			panels.day,
+			panels.night,
 			el('p', { class: 'muted small', text: t('hoursHelp') }),
 			locked ? null : el('div', { class: 'row actions' }, [
 				saveBtn,
 				rec ? el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')) : null,
 			]),
 		]);
+		showShift(S.entryShift);
 		update();
 		return form;
 	}
@@ -1042,18 +1125,34 @@
 	/* Servers tab                                                         */
 	/* ------------------------------------------------------------------ */
 
+	/** Runs a server change and redraws. Returns the database's answer, or false if it failed. */
 	async function serverAction(fn, args, button) {
 		return busy(button, async function () {
+			let result;
 			try {
-				await API.rpc(fn, Object.assign({ p_token: S.token }, args));
+				result = await API.rpc(fn, Object.assign({ p_token: S.token }, args));
 				await refreshBootstrap();
 			} catch (e) {
 				handleError(e);
 				return false;
 			}
 			render();
-			return true;
+			return result || true;
 		});
+	}
+
+	/**
+	 * The list is alphabetical, so a new or renamed server lands somewhere in
+	 * the middle. Scroll to that row and flash it so it is easy to find.
+	 */
+	function showServerRow(id) {
+		const row = Array.prototype.find.call(document.querySelectorAll('.server-row'), function (li) {
+			return li.getAttribute('data-server-id') === id;
+		});
+		if (row) {
+			row.classList.add('is-new');
+			row.scrollIntoView({ block: 'nearest' });
+		}
 	}
 
 	function renderStaffTab() {
@@ -1067,28 +1166,18 @@
 				toast(t('err_invalid_name'), 'error');
 				return;
 			}
-			if (await serverAction('add_server', { p_name: name }, addBtn)) {
+			const added = await serverAction('add_server', { p_name: name }, addBtn);
+			if (added) {
 				const again = document.querySelector('.add-server input');
 				if (again) {
-					again.focus();
+					again.focus({ preventScroll: true }); // ready for the next name
 				}
+				showServerRow(added.id);
 			}
 		}
 
-		function move(i, d) {
-			const ids = S.servers.map(function (s) { return s.id; });
-			const j = i + d;
-			if (j < 0 || j >= ids.length) {
-				return;
-			}
-			const tmp = ids[i];
-			ids[i] = ids[j];
-			ids[j] = tmp;
-			serverAction('set_server_order', { p_ids: ids });
-		}
-
-		const list = S.servers.map(function (s, i) {
-			return el('li', { class: 'server-row' + (s.active ? '' : ' is-inactive') }, [
+		const list = S.servers.map(function (s) {
+			return el('li', { class: 'server-row' + (s.active ? '' : ' is-inactive'), 'data-server-id': s.id }, [
 				el('input', {
 					type: 'text',
 					maxlength: C.MAX_NAME_LENGTH,
@@ -1102,7 +1191,9 @@
 							return;
 						}
 						serverAction('rename_server', { p_id: s.id, p_name: name }).then(function (ok) {
-							if (!ok) {
+							if (ok) {
+								showServerRow(s.id); // the new name may have moved it
+							} else {
 								e.target.value = s.name;
 							}
 						});
@@ -1110,8 +1201,6 @@
 				}),
 				el('span', { class: 'badge ' + (s.active ? 'on' : 'off'), text: s.active ? t('active') : t('inactive') }),
 				isAdmin() ? el('div', { class: 'row tight' }, [
-					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('moveUp'), disabled: i === 0, onclick: function () { move(i, -1); } }, '↑'),
-					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('moveDown'), disabled: i === S.servers.length - 1, onclick: function () { move(i, 1); } }, '↓'),
 					el('button', {
 						type: 'button',
 						class: 'btn small',
@@ -1165,7 +1254,7 @@
 			el('ul', { class: 'facts' }, [
 				el('li', { text: t('factSplit', { pct: st.server_pct, kpct: 100 - st.server_pct }) }),
 				el('li', { text: t('factPeriods') }),
-				el('li', { text: t('factWindow', { hours: st.edit_window_hours }) }),
+				el('li', { text: t('factWindow') }),
 				el('li', { text: t('factRetention', { months: st.retention_months }) }),
 				el('li', { text: t('factTimezone', { tz: st.timezone }) }),
 			]),

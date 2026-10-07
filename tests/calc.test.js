@@ -205,3 +205,26 @@ test('period and month helpers', () => {
 	assert.deepEqual(C.monthRange('2028-02'), { from: '2028-02-01', to: '2028-02-29' });
 	assert.equal(C.shiftMonth('2026-01', -1), '2025-12');
 });
+
+test('servers are always listed alphabetically', () => {
+	const names = (list) => C.sortServers(list.map((name, i) => ({ id: 'id' + i, name }))).map((s) => s.name);
+	// Upper/lower case does not matter; a new server takes its place by name, not the end.
+	assert.deepEqual(names(['Noriko', 'Masumi', 'ellen', 'Chika', 'adam']), ['adam', 'Chika', 'ellen', 'Masumi', 'Noriko']);
+	// English before Korean, Korean in 가나다 order, numbers by value.
+	assert.deepEqual(names(['김민수', 'Zoe', '가은', 'Server 10', 'Server 2']), ['Server 2', 'Server 10', 'Zoe', '가은', '김민수']);
+	// The input list is not changed, and equal names keep a stable order (by id).
+	const input = [{ id: 'b', name: 'Sam' }, { id: 'a', name: 'Sam' }];
+	assert.deepEqual(C.sortServers(input).map((s) => s.id), ['a', 'b']);
+	assert.equal(input[0].id, 'b');
+});
+
+test('report rows follow the (alphabetical) server list; removed servers come last', () => {
+	const sorted = C.sortServers([{ id: 'n', name: 'Noriko' }, { id: 'a', name: 'adam' }, { id: 'c', name: 'Chika' }]);
+	const s = C.summarize({
+		serverPct: 60,
+		servers: sorted,
+		days: [{ date: '2026-10-01', dayTips: 30000, totalTips: 30000 }],
+		hours: [h('2026-10-01', 'gone', 'day', 100), h('2026-10-01', 'n', 'day', 100), h('2026-10-01', 'c', 'day', 100), h('2026-10-01', 'a', 'day', 100)],
+	}, '2026-10-01', '2026-10-15');
+	assert.deepEqual(s.rows.map((r) => r.name), ['adam', 'Chika', 'Noriko', null]);
+});

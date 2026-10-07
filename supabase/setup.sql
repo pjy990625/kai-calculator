@@ -14,8 +14,9 @@
 -- Security model
 --   * All tables live in the `private` schema, which the Supabase API
 --     does not expose. The browser can only call the public.* functions
---     below, and every rule (password, 24h lock, admin-only actions,
---     3-month retention) is enforced here, not in the browser.
+--     below, and every rule (password, staff can only change today's
+--     record, admin-only actions, 3-month retention) is enforced here,
+--     not in the browser.
 --   * Passwords are stored as bcrypt hashes. Session tokens are random;
 --     only their SHA-256 is stored.
 -- =====================================================================
@@ -35,21 +36,24 @@ create table if not exists private.config (
 	server_pct        int  not null default 60 check (server_pct between 1 and 100),
 	period_anchor     date not null default '2026-01-05',
 	timezone          text not null default 'America/Los_Angeles',
-	edit_window_hours int  not null default 24 check (edit_window_hours between 1 and 168),
 	retention_months  int  not null default 3 check (retention_months between 1 and 24),
 	staff_hash        text,
 	admin_hash        text
 );
 insert into private.config (id) values (1) on conflict (id) do nothing;
+-- Older versions let staff edit for N hours after the first save. Staff can
+-- now edit until the end of the record's own date, so the setting is gone.
+alter table private.config drop column if exists edit_window_hours;
 
 create table if not exists private.servers (
 	id         uuid primary key default gen_random_uuid(),
 	name       text not null check (char_length(name) between 1 and 60),
 	active     boolean not null default true,
-	sort_order int not null default 0,
 	created_at timestamptz not null default now()
 );
 create unique index if not exists servers_name_ci on private.servers (lower(name));
+-- Older versions had a manual order. Servers are now always listed by name.
+alter table private.servers drop column if exists sort_order;
 
 create table if not exists private.days (
 	date             date primary key,
@@ -272,21 +276,57 @@ begin
 end;
 $$;
 
--- Can this role change the record of p_date right now?
-create or replace function private.can_edit(p_role text, p_date date, p_created_at timestamptz)
+-- Can this role add or change the record of p_date right now?
+-- Staff: only on that date itself, i.e. until 11:59 PM restaurant time.
+-- From midnight on, the day is closed and only the admin can change it.
+drop function if exists private.can_edit(text, date, timestamptz); -- older signature
+create or replace function private.can_edit(p_role text, p_date date)
 returns boolean
 language sql
 stable
 set search_path = ''
 as $$
 	select case
-		when p_date < private.retention_start() or p_date > private.today() then false
+		when p_date is null or p_date < private.retention_start() or p_date > private.today() then false
 		when p_role = 'admin' then true
-		-- Existing record: staff may edit for N hours after it was first saved.
-		when p_created_at is not null then now() < p_created_at + make_interval(hours => (private.cfg()).edit_window_hours)
-		-- New record: staff may create today or yesterday (night shift entered after midnight).
-		else p_date >= private.today() - 1
+		else p_date = private.today()
 	end;
+$$;
+
+-- Checks a list of hours for ONE shift:
+--   [{"server_id": "...", "hundredths": 550}, ...]   (550 = 5.5 h)
+create or replace function private.check_hours(p_hours jsonb)
+returns void
+language plpgsql
+stable
+set search_path = ''
+as $$
+declare
+	v_e jsonb;
+	v_h numeric;
+begin
+	if p_hours is null or jsonb_typeof(p_hours) <> 'array' or jsonb_array_length(p_hours) > 200 then
+		perform private.fail('invalid_hours');
+	end if;
+	for v_e in select value from jsonb_array_elements(p_hours) loop
+		if jsonb_typeof(v_e) <> 'object'
+			or jsonb_typeof(v_e -> 'hundredths') is distinct from 'number'
+			or coalesce(v_e ->> 'server_id', '') !~ '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$' then
+			perform private.fail('invalid_hours');
+		end if;
+		v_h := (v_e ->> 'hundredths')::numeric;
+		if v_h <> trunc(v_h) or v_h < 1 or v_h > 2400 then
+			perform private.fail('invalid_hours');
+		end if;
+		if not exists (select 1 from private.servers s where s.id = (v_e ->> 'server_id')::uuid) then
+			perform private.fail('unknown_server');
+		end if;
+	end loop;
+	-- The same server twice in one shift.
+	if (select count(*) <> count(distinct lower(e ->> 'server_id')) from jsonb_array_elements(p_hours) e) then
+		perform private.fail('invalid_hours');
+	end if;
+end;
 $$;
 
 create or replace function private.server_json(p_id uuid)
@@ -295,7 +335,7 @@ language sql
 stable
 set search_path = ''
 as $$
-	select json_build_object('id', s.id, 'name', s.name, 'active', s.active, 'sort_order', s.sort_order)
+	select json_build_object('id', s.id, 'name', s.name, 'active', s.active)
 	from private.servers s where s.id = p_id;
 $$;
 
@@ -382,12 +422,12 @@ begin
 			'server_pct', v_cfg.server_pct,
 			'period_anchor', v_cfg.period_anchor,
 			'timezone', v_cfg.timezone,
-			'edit_window_hours', v_cfg.edit_window_hours,
 			'retention_months', v_cfg.retention_months
 		),
 		'servers', coalesce((
-			select json_agg(json_build_object('id', s.id, 'name', s.name, 'active', s.active, 'sort_order', s.sort_order)
-				order by s.sort_order, lower(s.name))
+			-- By name; the browser re-sorts with its own (language-aware) rules.
+			select json_agg(json_build_object('id', s.id, 'name', s.name, 'active', s.active)
+				order by lower(s.name), s.id)
 			from private.servers s
 		), '[]'::json)
 	);
@@ -402,7 +442,6 @@ set search_path = ''
 as $$
 declare
 	v_role text := private.session_role(p_token);
-	v_window int := (private.cfg()).edit_window_hours;
 begin
 	if p_from is null or p_to is null or p_from > p_to or p_to - p_from > 100 then
 		perform private.fail('invalid_range');
@@ -418,8 +457,7 @@ begin
 				'total_tips_cents', d.total_tips_cents,
 				'created_at', d.created_at,
 				'updated_at', d.updated_at,
-				'edit_until', case when v_role = 'staff' then d.created_at + make_interval(hours => v_window) end,
-				'editable', private.can_edit(v_role, d.date, d.created_at)
+				'editable', private.can_edit(v_role, d.date)
 			) order by d.date)
 			from private.days d where d.date between p_from and p_to
 		), '[]'::json),
@@ -432,8 +470,114 @@ begin
 end;
 $$;
 
--- Create or replace the whole record of one date (tips + everyone's hours).
+-- Save one date. The day shift and the night shift are saved separately, so
+-- the person entering night tips at closing can never overwrite what someone
+-- else entered for lunch (and the other way round).
+--
+--   p_day_hours   NULL → leave the day shift as it is.
+--                 else → set day tips to p_day_tips_cents and replace the day hours.
+--   p_night_hours NULL → leave the night shift as it is.
+--                 else → set the whole-day total to p_total_tips_cents (NULL = not
+--                        entered yet) and replace the night hours.
+--   hours: [{"server_id": "...", "hundredths": 550}, ...]
+--
+-- Night tips are never stored: night tips = whole-day total − day tips.
+create or replace function public.save_shifts(
+	p_token text,
+	p_date date,
+	p_day_tips_cents bigint,
+	p_day_hours jsonb,
+	p_total_tips_cents bigint,
+	p_night_hours jsonb
+)
+returns json
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+	v_role text := private.session_role(p_token);
+	v_existing private.days;
+	v_set_day boolean := p_day_hours is not null;
+	v_set_night boolean := p_night_hours is not null;
+	v_day bigint;
+	v_total bigint;
+begin
+	if p_date is null then
+		perform private.fail('invalid_date');
+	end if;
+	if p_date > private.today() then
+		perform private.fail('future_date');
+	end if;
+	if p_date < private.retention_start() then
+		perform private.fail('too_old');
+	end if;
+	if not v_set_day and not v_set_night then
+		perform private.fail('invalid_hours'); -- nothing to save
+	end if;
+
+	select d.* into v_existing from private.days d where d.date = p_date for update;
+	if not private.can_edit(v_role, p_date) then
+		perform private.fail(case when v_existing.date is null then 'date_locked' else 'locked' end);
+	end if;
+
+	-- The shift that is not being saved keeps what is stored.
+	v_day := case when v_set_day then p_day_tips_cents else coalesce(v_existing.day_tips_cents, 0) end;
+	v_total := case when v_set_night then p_total_tips_cents else v_existing.total_tips_cents end;
+	if v_day is null or v_day not between 0 and 100000000
+		or (v_total is not null and v_total not between v_day and 100000000) then
+		perform private.fail('invalid_tips');
+	end if;
+	if v_set_day then
+		perform private.check_hours(p_day_hours);
+	end if;
+	if v_set_night then
+		perform private.check_hours(p_night_hours);
+	end if;
+
+	begin
+		insert into private.days as d (date, day_tips_cents, total_tips_cents, created_by, updated_by)
+		values (p_date, v_day, v_total, v_role, v_role)
+		on conflict (date) do update set
+			-- Only the columns of the shift being saved (matters when two phones save at once).
+			day_tips_cents = case when v_set_day then excluded.day_tips_cents else d.day_tips_cents end,
+			total_tips_cents = case when v_set_night then excluded.total_tips_cents else d.total_tips_cents end,
+			updated_at = now(),
+			updated_by = v_role;
+	exception when check_violation then
+		perform private.fail('invalid_tips'); -- whole-day total below day tips
+	end;
+
+	if v_set_day then
+		delete from private.hours h where h.date = p_date and h.shift = 'day';
+		insert into private.hours (date, server_id, shift, hundredths)
+		select p_date, (e ->> 'server_id')::uuid, 'day', (e ->> 'hundredths')::int
+		from jsonb_array_elements(p_day_hours) e;
+	end if;
+	if v_set_night then
+		delete from private.hours h where h.date = p_date and h.shift = 'night';
+		insert into private.hours (date, server_id, shift, hundredths)
+		select p_date, (e ->> 'server_id')::uuid, 'night', (e ->> 'hundredths')::int
+		from jsonb_array_elements(p_night_hours) e;
+	end if;
+
+	perform private.log(v_role, case when v_existing.date is null then 'create_day' else 'update_day' end, jsonb_build_object(
+		'date', p_date,
+		'before', case when v_existing.date is null then null else jsonb_build_object(
+			'day_tips_cents', v_existing.day_tips_cents, 'total_tips_cents', v_existing.total_tips_cents) end,
+		'after', jsonb_build_object('day_tips_cents', v_day, 'total_tips_cents', v_total,
+			'day_hours', p_day_hours, 'night_hours', p_night_hours)
+	));
+	perform private.purge();
+	return json_build_object('ok', true, 'date', p_date);
+end;
+$$;
+
+-- OLD API, kept only for phones that still have the previous version of the
+-- page open: replaces the whole record of one date in one call.
 -- p_hours: [{"server_id": "...", "shift": "day"|"night", "hundredths": 550}, ...]
+-- The app itself now calls save_shifts. Safe to delete once every phone has
+-- reloaded the page (a few days after the update).
 create or replace function public.save_day(
 	p_token text,
 	p_date date,
@@ -446,78 +590,20 @@ language plpgsql
 security definer
 set search_path = ''
 as $$
-declare
-	v_role text := private.session_role(p_token);
-	v_existing private.days;
-	v_e jsonb;
-	v_h numeric;
-	v_count int;
 begin
-	if p_date is null then
-		perform private.fail('invalid_date');
-	end if;
-	if p_date > private.today() then
-		perform private.fail('future_date');
-	end if;
-	if p_date < private.retention_start() then
-		perform private.fail('too_old');
-	end if;
-
-	select d.* into v_existing from private.days d where d.date = p_date for update;
-	if not private.can_edit(v_role, p_date, v_existing.created_at) then
-		perform private.fail(case when v_existing.date is null then 'date_locked' else 'locked' end);
-	end if;
-
-	if p_day_tips_cents is null or p_day_tips_cents not between 0 and 100000000
-		or (p_total_tips_cents is not null and p_total_tips_cents not between p_day_tips_cents and 100000000) then
-		perform private.fail('invalid_tips');
-	end if;
-
-	if p_hours is null or jsonb_typeof(p_hours) <> 'array' or jsonb_array_length(p_hours) > 400 then
+	if p_hours is null or jsonb_typeof(p_hours) <> 'array' or exists (
+		select 1 from jsonb_array_elements(p_hours) e
+		where jsonb_typeof(e) <> 'object' or coalesce(e ->> 'shift', '') not in ('day', 'night')
+	) then
 		perform private.fail('invalid_hours');
 	end if;
-	for v_e in select value from jsonb_array_elements(p_hours) loop
-		if jsonb_typeof(v_e) <> 'object'
-			or coalesce(v_e ->> 'shift', '') not in ('day', 'night')
-			or jsonb_typeof(v_e -> 'hundredths') is distinct from 'number'
-			or coalesce(v_e ->> 'server_id', '') !~ '^[0-9a-fA-F-]{36}$' then
-			perform private.fail('invalid_hours');
-		end if;
-		v_h := (v_e ->> 'hundredths')::numeric;
-		if v_h <> trunc(v_h) or v_h < 1 or v_h > 2400 then
-			perform private.fail('invalid_hours');
-		end if;
-		if not exists (select 1 from private.servers s where s.id = (v_e ->> 'server_id')::uuid) then
-			perform private.fail('unknown_server');
-		end if;
-	end loop;
-	select count(*) - count(distinct (e ->> 'server_id', e ->> 'shift')) into v_count
-	from jsonb_array_elements(p_hours) e;
-	if v_count > 0 then
-		perform private.fail('invalid_hours');
-	end if;
-
-	insert into private.days (date, day_tips_cents, total_tips_cents, created_by, updated_by)
-	values (p_date, p_day_tips_cents, p_total_tips_cents, v_role, v_role)
-	on conflict (date) do update set
-		day_tips_cents = excluded.day_tips_cents,
-		total_tips_cents = excluded.total_tips_cents,
-		updated_at = now(),
-		updated_by = v_role;
-
-	delete from private.hours h where h.date = p_date;
-	insert into private.hours (date, server_id, shift, hundredths)
-	select p_date, (e ->> 'server_id')::uuid, e ->> 'shift', (e ->> 'hundredths')::int
-	from jsonb_array_elements(p_hours) e;
-
-	perform private.log(v_role, case when v_existing.date is null then 'create_day' else 'update_day' end, jsonb_build_object(
-		'date', p_date,
-		'before', case when v_existing.date is null then null else jsonb_build_object(
-			'day_tips_cents', v_existing.day_tips_cents, 'total_tips_cents', v_existing.total_tips_cents) end,
-		'after', jsonb_build_object('day_tips_cents', p_day_tips_cents, 'total_tips_cents', p_total_tips_cents, 'hours', p_hours)
-	));
-	perform private.purge();
-	return json_build_object('ok', true, 'date', p_date);
+	return public.save_shifts(
+		p_token, p_date,
+		p_day_tips_cents,
+		(select coalesce(jsonb_agg(e - 'shift'), '[]'::jsonb) from jsonb_array_elements(p_hours) e where e ->> 'shift' = 'day'),
+		p_total_tips_cents,
+		(select coalesce(jsonb_agg(e - 'shift'), '[]'::jsonb) from jsonb_array_elements(p_hours) e where e ->> 'shift' = 'night')
+	);
 end;
 $$;
 
@@ -535,7 +621,7 @@ begin
 	if v_existing.date is null then
 		perform private.fail('not_found');
 	end if;
-	if not private.can_edit(v_role, p_date, v_existing.created_at) then
+	if not private.can_edit(v_role, p_date) then
 		perform private.fail('locked');
 	end if;
 	delete from private.days d where d.date = p_date;
@@ -562,9 +648,7 @@ begin
 	if exists (select 1 from private.servers s where lower(s.name) = lower(v_name)) then
 		perform private.fail('duplicate_name');
 	end if;
-	insert into private.servers (name, sort_order)
-	values (v_name, coalesce((select max(s.sort_order) + 1 from private.servers s), 0))
-	returning id into v_id;
+	insert into private.servers (name) values (v_name) returning id into v_id;
 	perform private.log(v_role, 'add_server', jsonb_build_object('id', v_id, 'name', v_name));
 	return private.server_json(v_id);
 end;
@@ -636,21 +720,8 @@ begin
 end;
 $$;
 
--- p_ids: every server id in the new order.
-create or replace function public.set_server_order(p_token text, p_ids uuid[])
-returns json
-language plpgsql
-security definer
-set search_path = ''
-as $$
-begin
-	perform private.require_admin(p_token);
-	update private.servers s set sort_order = o.pos
-	from unnest(p_ids) with ordinality as o(id, pos)
-	where s.id = o.id;
-	return json_build_object('ok', true);
-end;
-$$;
+-- Older versions let the admin order servers by hand.
+drop function if exists public.set_server_order(text, uuid[]);
 
 create or replace function public.update_settings(
 	p_token text,
@@ -739,8 +810,8 @@ begin
 		select p.oid::regprocedure as sig
 		from pg_proc p join pg_namespace n on n.oid = p.pronamespace
 		where n.nspname = 'public'
-			and p.proname in ('login', 'logout', 'get_bootstrap', 'get_range', 'save_day', 'delete_day',
-				'add_server', 'rename_server', 'set_server_active', 'delete_server', 'set_server_order',
+			and p.proname in ('login', 'logout', 'get_bootstrap', 'get_range', 'save_shifts', 'save_day', 'delete_day',
+				'add_server', 'rename_server', 'set_server_active', 'delete_server',
 				'update_settings', 'change_password')
 	loop
 		execute format('revoke all on function %s from public', r.sig);
@@ -750,3 +821,6 @@ begin
 	end loop;
 end;
 $$;
+
+-- Tell the Supabase API about new / removed functions right away.
+notify pgrst, 'reload schema';

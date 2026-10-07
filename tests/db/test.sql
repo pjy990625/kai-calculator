@@ -56,64 +56,105 @@ select test.ok((public.rename_server(:'staff_token', :'bob', 'Bobby'))->>'name' 
 select test.ok(test.err(format('select public.set_server_active(%L, %L, false)', :'staff_token', :'bob')) = 'admin_only', 'staff cannot deactivate');
 select test.ok(test.err(format('select public.update_settings(%L, %L, 60, %L)', :'staff_token', 'X', '2026-09-28')) = 'admin_only', 'staff cannot change settings');
 select test.ok(test.err(format('select public.change_password(%L, %L, %L)', :'staff_token', 'staff', '1234')) = 'admin_only', 'staff cannot change passwords');
-select test.ok((public.get_bootstrap(:'staff_token'))->'servers'->0->>'name' = 'Alice', 'name trimmed, order kept');
+select test.ok((public.get_bootstrap(:'staff_token'))->'servers'->0->>'name' = 'Alice', 'name trimmed, listed by name');
+select (public.add_server(:'staff_token', 'adam'))->>'id' as adam \gset
+select test.ok((public.get_bootstrap(:'staff_token'))->'servers'->0->>'name' = 'adam', 'a new server takes its place by name (case-insensitive), not the end');
+select test.ok((public.get_bootstrap(:'staff_token'))->'servers'->0->>'sort_order' is null, 'no manual order any more');
+select test.ok(to_regprocedure('public.set_server_order(text, uuid[])') is null, 'manual ordering function removed');
 
-\echo '-- save_day validation'
+\echo '-- save_shifts: day and night are saved separately'
+select format('[{"server_id":"%s","hundredths":600},{"server_id":"%s","hundredths":400}]', :'alice', :'bob') as day_hours \gset
+select format('[{"server_id":"%s","hundredths":500}]', :'alice') as night_hours \gset
+select test.ok((public.save_shifts(:'staff_token', :'today'::date, 50000, :'day_hours'::jsonb, null, null))->>'ok' = 'true', 'staff saves the day shift (lunch)');
+select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days'->0->>'total_tips_cents' is null, 'whole-day total still empty after lunch');
+select test.ok(json_array_length((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'hours') = 2, 'two day-hour rows');
+select test.ok((public.save_shifts(:'staff_token', :'today'::date, null, null, 150000, :'night_hours'::jsonb))->>'ok' = 'true', 'staff saves the night shift (closing)');
+select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days'->0->>'day_tips_cents' = '50000', 'saving night keeps day tips');
+select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days'->0->>'total_tips_cents' = '150000', 'total stored');
+select test.ok(json_array_length((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'hours') = 3, 'saving night keeps day hours');
+select test.ok((public.save_shifts(:'staff_token', :'today'::date, 55000, :'day_hours'::jsonb, null, null))->>'ok' = 'true', 'day shift corrected later');
+select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days'->0->>'total_tips_cents' = '150000', 'saving day keeps the whole-day total');
+select test.ok(json_array_length((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'hours') = 3, 'saving day keeps night hours');
+select test.ok((public.save_shifts(:'staff_token', :'today'::date, 50000, :'day_hours'::jsonb, 150000, :'night_hours'::jsonb))->>'ok' = 'true', 'both shifts in one call');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date, 150001, %L::jsonb, null, null)', :'staff_token', :'today', :'day_hours')) = 'invalid_tips', 'day tips above the stored total rejected');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date, null, null, 49999, %L::jsonb)', :'staff_token', :'today', '[]')) = 'invalid_tips', 'total below the stored day tips rejected');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date, null, %L::jsonb, null, null)', :'staff_token', :'today', '[]')) = 'invalid_tips', 'day shift needs day tips');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date, 1, null, 2, null)', :'staff_token', :'today')) = 'invalid_hours', 'nothing to save rejected');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date, 0, %L::jsonb, null, null)', :'staff_token', :'today',
+	format('[{"server_id":"%s","hundredths":2401}]', :'alice'))) = 'invalid_hours', 'over 24h rejected');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date, 0, %L::jsonb, null, null)', :'staff_token', :'today',
+	format('[{"server_id":"%s","hundredths":5.5}]', :'alice'))) = 'invalid_hours', 'fractional hundredths rejected');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date, 0, %L::jsonb, null, null)', :'staff_token', :'today',
+	format('[{"server_id":"%s","hundredths":100},{"server_id":"%s","hundredths":200}]', :'alice', upper(:'alice')))) = 'invalid_hours', 'same server twice in one shift rejected');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date, 0, %L::jsonb, null, null)', :'staff_token', :'today',
+	'[{"server_id":"00000000-0000-0000-0000-000000000000","hundredths":100}]')) = 'unknown_server', 'unknown server rejected');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date, 0, %L::jsonb, null, null)', :'staff_token', :'today',
+	'[{"server_id":"------------------------------------","hundredths":100}]')) = 'invalid_hours', 'malformed server id rejected');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date, 0, %L::jsonb, null, null)', :'staff_token', :'today', '{"a":1}')) = 'invalid_hours', 'non-array rejected');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date + 1, 0, %L::jsonb, null, null)', :'staff_token', :'today', '[]')) = 'future_date', 'future date rejected');
+select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days'->0->>'day_tips_cents' = '50000', 'rejected saves change nothing');
+select test.ok(json_array_length((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'hours') = 3, 'rejected saves keep the hours');
+
+\echo '-- save_day (old API, for phones that have not reloaded yet)'
 \set hours '[{"server_id":":alice","shift":"day","hundredths":600},{"server_id":":bob","shift":"day","hundredths":400},{"server_id":":alice","shift":"night","hundredths":500}]'
 select replace(replace(:'hours', ':alice', :'alice'), ':bob', :'bob') as hours \gset
-select test.ok((public.save_day(:'staff_token', :'today'::date, 50000, 150000, :'hours'::jsonb))->>'ok' = 'true', 'staff saves today');
+select test.ok((public.save_day(:'staff_token', :'today'::date, 50000, 150000, :'hours'::jsonb))->>'ok' = 'true', 'old API still saves today');
+select test.ok(json_array_length((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'hours') = 3, 'old API replaces all hours');
 select test.ok(test.err(format('select public.save_day(%L, %L::date, 500, 400, %L::jsonb)', :'staff_token', :'today', '[]')) = 'invalid_tips', 'total < day tips rejected');
 select test.ok(test.err(format('select public.save_day(%L, %L::date, -1, null, %L::jsonb)', :'staff_token', :'today', '[]')) = 'invalid_tips', 'negative tips rejected');
 select test.ok(test.err(format('select public.save_day(%L, %L::date, 0, null, %L::jsonb)', :'staff_token', :'today',
 	format('[{"server_id":"%s","shift":"day","hundredths":2401}]', :'alice'))) = 'invalid_hours', 'over 24h rejected');
 select test.ok(test.err(format('select public.save_day(%L, %L::date, 0, null, %L::jsonb)', :'staff_token', :'today',
-	format('[{"server_id":"%s","shift":"day","hundredths":5.5}]', :'alice'))) = 'invalid_hours', 'fractional hundredths rejected');
+	format('[{"server_id":"%s","shift":"lunch","hundredths":100}]', :'alice'))) = 'invalid_hours', 'unknown shift rejected');
 select test.ok(test.err(format('select public.save_day(%L, %L::date, 0, null, %L::jsonb)', :'staff_token', :'today',
 	format('[{"server_id":"%s","shift":"day","hundredths":100},{"server_id":"%s","shift":"day","hundredths":200}]', :'alice', :'alice'))) = 'invalid_hours', 'duplicate entries rejected');
-select test.ok(test.err(format('select public.save_day(%L, %L::date, 0, null, %L::jsonb)', :'staff_token', :'today',
-	'[{"server_id":"00000000-0000-0000-0000-000000000000","shift":"day","hundredths":100}]')) = 'unknown_server', 'unknown server rejected');
 select test.ok(test.err(format('select public.save_day(%L, %L::date, 0, null, %L::jsonb)', :'staff_token', :'today', '{"a":1}')) = 'invalid_hours', 'non-array rejected');
-select test.ok(test.err(format('select public.save_day(%L, %L::date + 1, 0, null, %L::jsonb)', :'staff_token', :'today', '[]')) = 'future_date', 'future date rejected');
+select test.ok(test.err(format('select public.save_day(%L, %L::date, 0, null, %L::jsonb)', :'staff_token', :'today', '[1]')) = 'invalid_hours', 'non-object entry rejected');
 
 \echo '-- get_range'
 select test.ok(json_array_length((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days') = 1, 'one day');
-select test.ok(json_array_length((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'hours') = 3, 'three hour rows');
-select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days'->0->>'editable' = 'true', 'fresh record editable by staff');
-select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days'->0->>'total_tips_cents' = '150000', 'total stored');
+select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days'->0->>'editable' = 'true', 'today is editable by staff');
+select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days'->0->>'edit_until' is null, 'no edit deadline timestamp any more');
 select test.ok(test.err(format('select public.get_range(%L, %L::date, %L::date - 1)', :'staff_token', :'today', :'today')) = 'invalid_range', 'reversed range rejected');
 select test.ok(test.err(format('select public.get_range(%L, %L::date - 200, %L::date)', :'staff_token', :'today', :'today')) = 'invalid_range', 'huge range rejected');
 
-\echo '-- which dates staff may create'
-select test.ok((public.save_day(:'staff_token', :'today'::date - 1, 1000, null, '[]'::jsonb))->>'ok' = 'true', 'staff can create yesterday (after-midnight entry)');
-select test.ok(test.err(format('select public.save_day(%L, %L::date - 3, 1000, null, %L::jsonb)', :'staff_token', :'today', '[]')) = 'date_locked', 'staff cannot back-fill 3 days ago');
-select test.ok((public.save_day(:'admin_token', :'today'::date - 3, 1000, null, '[]'::jsonb))->>'ok' = 'true', 'admin can back-fill');
+\echo '-- staff can only add or change TODAY (until 11:59 PM); the admin any date'
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 1, 1000, %L::jsonb, null, null)', :'staff_token', :'today', '[]')) = 'date_locked', 'staff cannot create yesterday');
+select test.ok(test.err(format('select public.save_day(%L, %L::date - 1, 1000, null, %L::jsonb)', :'staff_token', :'today', '[]')) = 'date_locked', 'staff cannot create yesterday (old API)');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 3, 1000, %L::jsonb, null, null)', :'staff_token', :'today', '[]')) = 'date_locked', 'staff cannot back-fill 3 days ago');
+select test.ok((public.save_shifts(:'admin_token', :'today'::date - 1, 1000, '[]'::jsonb, null, null))->>'ok' = 'true', 'admin can create yesterday');
+select test.ok((public.save_shifts(:'admin_token', :'today'::date - 3, 1000, '[]'::jsonb, null, null))->>'ok' = 'true', 'admin can back-fill');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 1, null, null, 2000, %L::jsonb)', :'staff_token', :'today', '[]')) = 'locked', 'staff cannot add night tips to yesterday');
+select test.ok(test.err(format('select public.save_day(%L, %L::date - 1, 1, null, %L::jsonb)', :'staff_token', :'today', '[]')) = 'locked', 'staff cannot change yesterday (old API)');
+select test.ok(test.err(format('select public.delete_day(%L, %L::date - 1)', :'staff_token', :'today')) = 'locked', 'staff cannot delete yesterday');
+select test.ok((public.get_range(:'staff_token', :'today'::date - 1, :'today'::date - 1))->'days'->0->>'editable' = 'false', 'yesterday shown as locked to staff');
+select test.ok((public.get_range(:'admin_token', :'today'::date - 1, :'today'::date - 1))->'days'->0->>'editable' = 'true', 'admin can still edit yesterday');
+select test.ok((public.save_shifts(:'admin_token', :'today'::date - 1, null, null, 2000, '[]'::jsonb))->>'ok' = 'true', 'admin edits a closed day');
 
-\echo '-- 24h lock'
+\echo '-- the lock follows the date, not the age of the record'
 reset role;
 update private.days set created_at = now() - interval '25 hours' where date = :'today'::date;
 set role anon;
-select test.ok(test.err(format('select public.save_day(%L, %L::date, 1, null, %L::jsonb)', :'staff_token', :'today', '[]')) = 'locked', 'staff locked after 24h');
-select test.ok(test.err(format('select public.delete_day(%L, %L::date)', :'staff_token', :'today')) = 'locked', 'staff cannot delete after 24h');
-select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days'->0->>'editable' = 'false', 'shown as locked to staff');
-select test.ok((public.get_range(:'admin_token', :'today'::date, :'today'::date))->'days'->0->>'editable' = 'true', 'admin still can edit');
-select test.ok((public.save_day(:'admin_token', :'today'::date, 60000, 160000, :'hours'::jsonb))->>'ok' = 'true', 'admin edits locked day');
+select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date))->'days'->0->>'editable' = 'true', 'today stays editable however long ago it was first saved');
+select test.ok((public.save_shifts(:'staff_token', :'today'::date, 60000, :'day_hours'::jsonb, 160000, :'night_hours'::jsonb))->>'ok' = 'true', 'staff edits today again');
 reset role;
-select test.ok((select created_at < now() - interval '24 hours' from private.days where date = :'today'::date), 'admin edit does not reset the lock');
 select test.ok((select count(*) = 3 from private.hours where date = :'today'::date), 'hours replaced, not duplicated');
 select test.ok((select count(*) >= 4 from private.audit_log), 'changes are audited');
+select test.ok((select count(*) = 1 from private.audit_log where action = 'create_day' and (detail ->> 'date')::date = :'today'::date), 'first save of a date is logged as create_day');
 set role anon;
 
 \echo '-- delete'
-select test.ok((public.delete_day(:'staff_token', :'today'::date - 1))->>'ok' = 'true', 'staff deletes fresh record');
-select test.ok(test.err(format('select public.delete_day(%L, %L::date - 1)', :'staff_token', :'today')) = 'not_found', 'already deleted');
+select test.ok((public.delete_day(:'admin_token', :'today'::date - 1))->>'ok' = 'true', 'admin deletes a closed day');
+select test.ok(test.err(format('select public.delete_day(%L, %L::date - 1)', :'admin_token', :'today')) = 'not_found', 'already deleted');
 
 \echo '-- server admin actions'
 select test.ok(test.err(format('select public.delete_server(%L, %L)', :'admin_token', :'alice')) = 'server_has_hours', 'server with hours cannot be deleted');
 select (public.add_server(:'staff_token', 'Carol'))->>'id' as carol \gset
 select test.ok((public.delete_server(:'admin_token', :'carol'))->>'ok' = 'true', 'admin deletes unused server');
 select test.ok((public.set_server_active(:'admin_token', :'bob', false))->>'active' = 'false', 'admin deactivates');
-select public.set_server_order(:'admin_token', array[:'bob', :'alice']::uuid[]);
-select test.ok((public.get_bootstrap(:'staff_token'))->'servers'->0->>'name' = 'Bobby', 'order changed');
+select test.ok((public.delete_server(:'admin_token', :'adam'))->>'ok' = 'true', 'admin deletes another unused server');
+select test.ok((public.rename_server(:'staff_token', :'alice', 'Zoe'))->>'name' = 'Zoe', 'rename');
+select test.ok((public.get_bootstrap(:'staff_token'))->'servers'->0->>'name' = 'Bobby', 'a renamed server moves to its new place by name');
 select test.ok((public.update_settings(:'admin_token', 'Kai Sushi', 60, '2026-09-28'))->>'ok' = 'true', 'admin updates settings');
 select test.ok(test.err(format('select public.update_settings(%L, %L, 0, %L)', :'admin_token', 'X', '2026-09-28')) = 'invalid_settings', 'bad pct rejected');
 
@@ -126,7 +167,7 @@ select private.purge();
 select test.ok((select count(*) = 0 from private.days where date < private.retention_start()), 'data older than 3 months deleted');
 select test.ok((select count(*) = 1 from private.days where date = (private.today() - interval '3 months' + interval '1 day')::date), 'recent data kept');
 set role anon;
-select test.ok(test.err(format('select public.save_day(%L, %L::date - 120, 1, null, %L::jsonb)', :'admin_token', :'today', '[]')) = 'too_old', 'cannot save older than retention');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 120, 1, %L::jsonb, null, null)', :'admin_token', :'today', '[]')) = 'too_old', 'cannot save older than retention');
 
 \echo '-- brute-force throttling'
 select set_config('request.headers', '{"x-forwarded-for":"10.9.9.9"}', false);

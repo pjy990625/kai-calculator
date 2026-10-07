@@ -1,6 +1,6 @@
 {
   "name": "kai-calculator",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Restaurant tip calculator — 60/40 day/night tip split by hours, shared Supabase database, 2-week reports",
   "scripts": {
