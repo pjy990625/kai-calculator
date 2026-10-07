@@ -275,7 +275,7 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	gap: 8px 12px; margin: 4px 0 16px;
 }
 .range-bar .row.nav { flex: 1 1 auto; justify-content: flex-end; }
-.cards.three .stat-value { white-space: nowrap; overflow-wrap: normal; }
+.stat-value { white-space: nowrap; overflow-wrap: normal; }
 /* Narrow phones: My tips gets a full row on top, hours and per-hour share the next. */
 @media (max-width: 420px) {
 	.card.mine .cards.three { grid-template-columns: 1fr 1fr; }
@@ -286,6 +286,7 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .stat.night .stat-value { color: var(--night); }
 
 .section-title { margin: 24px 0 8px; }
+.print-only { display: none; }
 .sub-report { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
 .generated { margin: 16px 0 0; }
 
@@ -411,6 +412,7 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	:root { --bg: #fff; --surface: #fff; --surface-2: #f3f3f3; --text: #000; --muted: #444; --line: #ccc; }
 	body { font-size: 12px; }
 	.no-print, .tabs, .toast-box, .notice.error { display: none !important; }
+	.print-only { display: block; }
 	.topbar { position: static; border: 0; }
 	.card { border: 0; box-shadow: none; padding: 0; }
 	.table-wrap { overflow: visible; }
@@ -427,4 +429,10 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 /* Very narrow phones: all four tabs still fit (after the 640px rules it overrides). */
 @media (max-width: 359px) {
 	.tab { padding: 10px 4px; font-size: .85rem; min-width: 44px; }
+}
+
+/* Narrow phones: the 4-column per-person table fits without sideways scrolling. */
+@media (max-width: 380px) {
+	.report-grid th, .report-grid td { padding-left: 4px; padding-right: 4px; }
+	.report-grid thead th { white-space: normal; }
 }

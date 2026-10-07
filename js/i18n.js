@@ -72,11 +72,10 @@
 			errNightNoHours: 'There are night tips, but nobody has night hours.',
 
 
-			reportPeriod: 'Half-month',
-			reportMonth: 'Month',
+			reportPeriod: 'Bi-weekly',
+			reportMonth: 'Monthly',
 			downloadCsv: 'Download CSV',
 			print: 'Print / PDF',
-			ruleNote: 'Servers get {pct}% of each shift’s tips, split by hours. The kitchen / sushi bar gets {kpct}%. Each server’s share is rounded to whole dollars (.50 and up, largest first; people with the same hours together) without ever going over the servers’ {pct}%.',
 			leftoverLine: 'Left after rounding {amount}',
 			leftoverNote: '{amount} of the servers’ share is left over after rounding to whole dollars (not paid to anyone).',
 			colLeftover: 'Left over',
@@ -232,11 +231,10 @@
 			errNightNoHours: '저녁 팁이 있는데 저녁 근무 시간이 입력된 서버가 없습니다.',
 
 
-			reportPeriod: '반월',
+			reportPeriod: '2주',
 			reportMonth: '월',
 			downloadCsv: 'CSV 다운로드',
 			print: '인쇄 / PDF',
-			ruleNote: '각 시프트 팁의 {pct}%는 서버들이 근무 시간 비율로 나누고, {kpct}%는 주방/스시바 몫입니다. 각자의 몫은 1달러 단위로 반올림합니다 (.50 이상, 소수점이 큰 순서대로, 같은 시간을 일한 사람은 함께). 단, 합계가 서버 몫 {pct}%를 넘지 않게 합니다.',
 			leftoverLine: '반올림 후 남은 금액 {amount}',
 			leftoverNote: '1달러 단위로 반올림한 뒤 서버 몫 중 {amount}이(가) 남았습니다 (아무에게도 지급되지 않음).',
 			colLeftover: '남은 금액',

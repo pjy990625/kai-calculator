@@ -27,6 +27,7 @@
 		tab: 'entry',
 		entryDate: null,
 		entryShift: 'day', // which tab of the daily entry card is open: 'day' | 'night'
+		entryShiftDate: null, // the date entryShift was chosen for
 		reportKind: 'period',
 		reportDate: null,
 		mineId: null,
@@ -821,8 +822,18 @@
 				saveBtn,
 			]),
 		]);
-		// A day with nothing saved yet always starts on the day-tips tab.
-		showShift(rec ? S.entryShift : 'day');
+		// Opening a date picks its tab: nothing saved → Day tips; day AND night
+		// saved → Night tips; only the day saved → the tab that was open. Redraws
+		// of the same date (e.g. after Save) keep the tab the user is on.
+		if (S.entryShiftDate !== date) {
+			S.entryShiftDate = date;
+			if (!rec) {
+				S.entryShift = 'day';
+			} else if (rec.totalTips !== null) {
+				S.entryShift = 'night';
+			}
+		}
+		showShift(S.entryShift);
 		update();
 		return form;
 	}
@@ -856,29 +867,24 @@
 		const r = rangeFor(S.reportKind, S.reportDate);
 		const isMonth = 'month' === S.reportKind;
 		loadRange(seq, r.from, r.to, function (range) {
-			const s = C.summarize(calcInput(range), r.from, r.to);
-			const controls = el('div', { class: 'card controls no-print' }, rangeControls(S.reportKind, r,
-				function (v) { S.reportKind = v; render(); },
-				function (d) { S.reportDate = d; render(); }
-			).concat([
-				el('div', { class: 'row wrap' }, [
-					el('button', { type: 'button', class: 'btn', onclick: function () { downloadCsv(s); } }, t('downloadCsv')),
-					el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
-				]),
-			]));
-			return el('div', { class: 'stack' }, [controls, renderReportBody(s, isMonth)]);
+			return renderReportBody(C.summarize(calcInput(range), r.from, r.to), r, isMonth);
 		});
 	}
 
-	function renderReportBody(s, isMonth) {
+	/** One card: period controls, totals, notices, per-person and per-day tables, CSV / print. */
+	function renderReportBody(s, r, isMonth) {
 		const tot = s.totals;
 		const parts = [
-			el('header', { class: 'report-head' }, [
+			// The on-screen period controls are not printed, so print gets its own heading.
+			el('header', { class: 'report-head print-only' }, [
 				S.settings.restaurant_name ? el('p', { class: 'eyebrow', text: S.settings.restaurant_name }) : null,
 				el('h2', { text: isMonth ? monthLabel(s.from.slice(0, 7)) : rangeLabel(s.from, s.to) }),
 				isMonth ? el('p', { class: 'muted', text: rangeLabel(s.from, s.to) }) : null,
-				el('p', { class: 'muted small', text: t('ruleNote', { pct: s.serverPct, kpct: 100 - s.serverPct }) }),
 			]),
+			el('div', { class: 'range-bar no-print' }, rangeControls(S.reportKind, r,
+				function (v) { S.reportKind = v; render(); },
+				function (d) { S.reportDate = d; render(); }
+			)),
 			el('div', { class: 'cards' }, [
 				statCard(t('cardTotalTips'), money(tot.tips), ''),
 				statCard(t('cardServers', { pct: s.serverPct }), money(tot.pool), 'accent'),
@@ -909,6 +915,10 @@
 			parts.push(el('h3', { class: 'section-title', text: t('perDayTitle') }));
 			parts.push(dayTable(s));
 		}
+		parts.push(el('div', { class: 'row actions no-print' }, [
+			el('button', { type: 'button', class: 'btn', onclick: function () { downloadCsv(s); } }, t('downloadCsv')),
+			el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
+		]));
 		return el('section', { class: 'card report' }, parts);
 	}
 
@@ -926,10 +936,6 @@
 				el(tag, { class: 'num strong', text: money(r.tips) }),
 				el(tag, { class: 'num', text: C.formatHours(r.hours) }),
 				el(tag, { class: 'num muted', text: money(r.perHourCents) }),
-				el(tag, { class: 'num day-col', text: C.formatHours(r.dayHours) }),
-				el(tag, { class: 'num day-col', text: money(r.dayTips) }),
-				el(tag, { class: 'num night-col', text: C.formatHours(r.nightHours) }),
-				el(tag, { class: 'num night-col', text: money(r.nightTips) }),
 			];
 		}
 		return el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
@@ -938,10 +944,6 @@
 				el('th', { class: 'num', text: t('colTips') }),
 				el('th', { class: 'num', text: t('colHours') }),
 				el('th', { class: 'num', text: t('colPerHour') }),
-				el('th', { class: 'num day-col', text: t('colDayHours') }),
-				el('th', { class: 'num day-col', text: t('colDayTips') }),
-				el('th', { class: 'num night-col', text: t('colNightHours') }),
-				el('th', { class: 'num night-col', text: t('colNightTips') }),
 			])),
 			el('tbody', null, rows.map(function (r) {
 				const name = r.name || t('unknownServer');
@@ -961,8 +963,6 @@
 			})),
 			el('tfoot', null, el('tr', null, [el('th', { text: t('total') })].concat(cells({
 				tips: tot.serverTips, hours: tot.hours, perHourCents: tot.perHourCents,
-				dayHours: tot.dayHours, nightHours: tot.nightHours,
-				dayTips: tot.serverDayTips, nightTips: tot.serverNightTips,
 			}, 'th')))),
 		]));
 	}
@@ -977,8 +977,6 @@
 				el('th', { class: 'num', text: t('colServerPool', { pct: s.serverPct }) }),
 				el('th', { class: 'num', text: t('colKitchen', { pct: 100 - s.serverPct }) }),
 				el('th', { class: 'num', text: t('colLeftover') }),
-				el('th', { class: 'num day-col', text: t('colDayHours') }),
-				el('th', { class: 'num night-col', text: t('colNightHours') }),
 			])),
 			el('tbody', null, s.days.map(function (d) {
 				return el('tr', null, [
@@ -989,8 +987,6 @@
 					el('td', { class: 'num', text: money(d.pool) }),
 					el('td', { class: 'num', text: money(d.kitchen) }),
 					el('td', { class: 'num muted', text: d.leftover ? money(d.leftover) : '—' }),
-					el('td', { class: 'num day-col', text: C.formatHours(d.dayHours) }),
-					el('td', { class: 'num night-col', text: C.formatHours(d.nightHours) }),
 				]);
 			})),
 		]));
