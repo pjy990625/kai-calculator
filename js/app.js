@@ -508,13 +508,12 @@
 					el('button', { type: 'button', class: 'btn small', onclick: function () { S.tab = 'staff'; render(); } }, t('goToServers')),
 				]);
 			}
-			const icon = 'day' === shift ? '☀ ' : '☾ ';
 			return el('div', { class: 'table-wrap' }, el('table', { class: 'grid entry-grid' }, [
 				// Fixed column widths: typing hours must never move the hours column.
 				el('colgroup', null, [el('col', { class: 'col-name' }), el('col', { class: 'col-hours' }), el('col', { class: 'col-share' })]),
 				el('thead', null, el('tr', null, [
 					el('th', { text: t('server') }),
-					el('th', { text: icon + t('hours') }),
+					el('th', { text: t('hours') }),
 					el('th', { class: 'num', text: shareLabel }),
 				])),
 				el('tbody', null, servers.map(function (s) {
@@ -665,6 +664,9 @@
 					return;
 				}
 			}
+			if (!(await stillOpen())) {
+				return;
+			}
 			await busy(saveBtn, async function () {
 				try {
 					await API.rpc('save_shifts', {
@@ -684,8 +686,31 @@
 			});
 		}
 
+		/**
+		 * Staff can only change today's record, and midnight may have passed since
+		 * this page was drawn. Ask the database for today's date first; if the day
+		 * has closed, say so and redraw it as locked.
+		 */
+		async function stillOpen() {
+			if (isAdmin()) {
+				return true;
+			}
+			try {
+				await refreshBootstrap();
+			} catch (e) {
+				handleError(e);
+				return false;
+			}
+			if (date === S.today) {
+				return true;
+			}
+			toast(t('err_locked'), 'error');
+			render();
+			return false;
+		}
+
 		async function onDelete() {
-			if (!window.confirm(t('confirmDeleteDay', { date: niceDate(date, true) }))) {
+			if (!window.confirm(t('confirmDeleteDay', { date: niceDate(date, true) })) || !(await stillOpen())) {
 				return;
 			}
 			try {
@@ -710,7 +735,7 @@
 		const panels = {
 			day: el('div', { id: 'shift-panel-day', class: 'shift-panel', role: 'tabpanel', 'aria-labelledby': 'shift-tab-day' }, [
 				el('div', { class: 'tips-grid' }, [
-					el('label', { class: 'field' }, [el('span', { text: '☀ ' + t('dayTips') }), dayTipsInput]),
+					el('label', { class: 'field' }, [el('span', { text: t('dayTips') }), dayTipsInput]),
 				]),
 				leftoverOut.day,
 				hoursTable('day', t('share')),
@@ -718,7 +743,7 @@
 			night: el('div', { id: 'shift-panel-night', class: 'shift-panel', role: 'tabpanel', 'aria-labelledby': 'shift-tab-night' }, [
 				el('div', { class: 'tips-grid' }, [
 					el('label', { class: 'field' }, [el('span', { text: t('totalTips') }), totalInput]),
-					el('div', { class: 'field' }, [el('span', { text: '☾ ' + t('nightTipsAuto') }), nightOut]),
+					el('div', { class: 'field' }, [el('span', { text: t('nightTipsAuto') }), nightOut]),
 				]),
 				totalHint,
 				leftoverOut.night,
@@ -742,24 +767,21 @@
 		});
 
 		const form = el('form', { class: 'card', onsubmit: onSave, novalidate: true }, [
-			el('div', { class: 'row between' }, [
-				el('h2', { text: t('entryTitle') }),
-				el('div', { class: 'row date-nav' }, [
-					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('prevDay'), onclick: function () { S.entryDate = C.addDays(date, -1); render(); } }, '‹'),
-					el('input', {
-						type: 'date', class: 'date-input', value: date, max: S.today, required: true, 'aria-label': t('date'),
-						onchange: function (e) {
-							if (C.isIsoDate(e.target.value)) {
-								S.entryDate = e.target.value;
-								render();
-							} else {
-								e.target.value = date; // iOS "Clear" leaves it empty
-							}
-						},
-					}),
-					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('nextDay'), disabled: date >= S.today, onclick: function () { S.entryDate = C.addDays(date, 1); render(); } }, '›'),
-					date !== S.today ? el('button', { type: 'button', class: 'btn small', onclick: function () { S.entryDate = S.today; render(); } }, t('today')) : null,
-				]),
+			el('div', { class: 'row date-nav' }, [
+				el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('prevDay'), onclick: function () { S.entryDate = C.addDays(date, -1); render(); } }, '‹'),
+				el('input', {
+					type: 'date', class: 'date-input', value: date, max: S.today, required: true, 'aria-label': t('date'),
+					onchange: function (e) {
+						if (C.isIsoDate(e.target.value)) {
+							S.entryDate = e.target.value;
+							render();
+						} else {
+							e.target.value = date; // iOS "Clear" leaves it empty
+						}
+					},
+				}),
+				el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('nextDay'), disabled: date >= S.today, onclick: function () { S.entryDate = C.addDays(date, 1); render(); } }, '›'),
+				date !== S.today ? el('button', { type: 'button', class: 'btn small', onclick: function () { S.entryDate = S.today; render(); } }, t('today')) : null,
 			]),
 			status,
 			el('div', { class: 'shift-tabs', role: 'tablist', 'aria-label': t('entryTitle') }, [tabButtons.day, tabButtons.night]),
@@ -1358,7 +1380,12 @@
 	// what the user was typing.
 	document.addEventListener('visibilitychange', function () {
 		if ('visible' === document.visibilityState && S.role) {
-			refreshBootstrap().catch(function (e) {
+			const before = S.today;
+			refreshBootstrap().then(function () {
+				if (S.today !== before && !isAdmin() && 'entry' === S.tab) {
+					render(); // a new day started: yesterday's record is now locked for staff
+				}
+			}).catch(function (e) {
 				if (e && e.code === 'not_authenticated') {
 					handleError(e);
 				}

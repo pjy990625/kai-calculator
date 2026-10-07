@@ -299,7 +299,7 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 /* Daily entry */
 
 .date-input { width: auto; min-height: 36px; padding: 4px 8px; }
-.row.date-nav { gap: 4px; flex-wrap: nowrap; }
+.row.date-nav { gap: 4px; flex-wrap: nowrap; justify-content: center; }
 /* Day tips / Night tips tabs inside the card. */
 .shift-tabs {
 	display: grid; grid-template-columns: 1fr 1fr; gap: 2px;

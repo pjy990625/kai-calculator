@@ -66,6 +66,10 @@
 		}
 		if (!res.ok) {
 			const msg = body && typeof body.message === 'string' ? body.message : '';
+			if (body && 'PGRST202' === body.code) {
+				// The function is missing: supabase/setup.sql has not been run for this version.
+				throw new ApiError('db_outdated', msg);
+			}
 			throw new ApiError(KNOWN.indexOf(msg) >= 0 ? msg : 'server', msg || ('HTTP ' + res.status));
 		}
 		return body;
