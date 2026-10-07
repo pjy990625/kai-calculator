@@ -815,12 +815,14 @@
 			panels.day,
 			panels.night,
 			el('p', { class: 'muted small', text: t('hoursHelp') }),
+			// Delete on the left of Save; Save at the right end.
 			locked ? null : el('div', { class: 'row actions' }, [
-				saveBtn,
 				rec ? el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')) : null,
+				saveBtn,
 			]),
 		]);
-		showShift(S.entryShift);
+		// A day with nothing saved yet always starts on the day-tips tab.
+		showShift(rec ? S.entryShift : 'day');
 		update();
 		return form;
 	}
@@ -1034,7 +1036,8 @@
 	function renderMineTab(seq) {
 		const known = S.servers.some(function (x) { return x.id === S.mineId; });
 		const id = known ? S.mineId : null;
-		const picker = el('label', { class: 'field' }, [
+		// "Your name" with the dropdown on its right.
+		const picker = el('label', { class: 'field inline' }, [
 			el('span', { text: t('pickYourName') }),
 			el('select', {
 				onchange: function (e) {
@@ -1050,17 +1053,14 @@
 		]);
 
 		if (!id) {
-			setMain(el('section', { class: 'card' }, [
-				el('h2', { text: t('tabMine') }),
-				el('p', { class: 'muted', text: S.servers.length ? t('pickYourNameHelp') : t('noServersYet') }),
+			setMain(el('section', { class: 'card mine' }, [
 				S.servers.length ? picker : null,
+				el('p', { class: 'muted', text: S.servers.length ? t('pickYourNameHelp') : t('noServersYet') }),
 			]));
 			return;
 		}
 
 		const r = rangeFor(S.mineKind, S.mineDate);
-		const isMonth = 'month' === S.mineKind;
-		const me = S.servers.find(function (x) { return x.id === id; });
 		loadRange(seq, r.from, r.to, function (range) {
 			const s = C.summarize(calcInput(range), r.from, r.to);
 			const row = s.rows.find(function (x) { return x.id === id; });
@@ -1073,51 +1073,39 @@
 			});
 			const pending = list.some(function (d) { return missing[d.date] && d.nightHours > 0; });
 
-			const controls = el('div', { class: 'card controls' }, [picker].concat(rangeControls(S.mineKind, r,
-				function (v) { S.mineKind = v; render(); },
-				function (d) { S.mineDate = d; render(); }
-			)));
-
-			const body = el('section', { class: 'card report' }, [
-				el('header', { class: 'report-head' }, [
-					el('p', { class: 'eyebrow', text: t('tabMine') }),
-					el('h2', { text: me.name }),
-					el('p', { class: 'muted', text: isMonth ? monthLabel(C.monthKey(r.from)) + ' · ' + rangeLabel(r.from, r.to) : rangeLabel(r.from, r.to) }),
-				]),
+			// One card: name, period, totals, then the day-by-day table.
+			return el('section', { class: 'card mine' }, [
+				picker,
+				el('div', { class: 'range-bar' }, rangeControls(S.mineKind, r,
+					function (v) { S.mineKind = v; render(); },
+					function (d) { S.mineDate = d; render(); }
+				)),
 				el('div', { class: 'cards three' }, [
 					statCard(t('cardMyHours'), C.formatHours(row ? row.hours : 0), 'accent'),
 					statCard(t('cardMyTips'), money(row ? row.tips : 0), ''),
 					statCard(t('colPerHour'), money(row ? row.perHourCents : 0), ''),
 				]),
-				el('p', { class: 'muted small', text: t('mineHelp') }),
 				list.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid mine-grid' }, [
 					el('thead', null, el('tr', null, [
 						el('th', { text: t('date') }),
-						el('th', { class: 'num day-col', text: '☀ ' + t('hours') }),
-						el('th', { class: 'num night-col', text: '☾ ' + t('hours') }),
 						el('th', { class: 'num', text: t('colHours') }),
 						el('th', { class: 'num', text: t('colTips') }),
 					])),
 					el('tbody', null, list.map(function (d) {
 						return el('tr', null, [
 							el('td', { class: 'name', text: niceDate(d.date, true) }),
-							el('td', { class: 'num day-col', text: d.dayHours ? C.formatHours(d.dayHours) : '–' }),
-							el('td', { class: 'num night-col', text: d.nightHours ? C.formatHours(d.nightHours) : '–' }),
 							el('td', { class: 'num strong', text: C.formatHours(d.hours) }),
 							el('td', { class: 'num', text: money(d.tips) + (missing[d.date] && d.nightHours ? ' *' : '') }),
 						]);
 					})),
 					el('tfoot', null, el('tr', null, [
 						el('th', { text: t('total') + ' (' + t(1 === list.length ? 'daysCountOne' : 'daysCount', { n: list.length }) + ')' }),
-						el('th', { class: 'num day-col', text: C.formatHours(row ? row.dayHours : 0) }),
-						el('th', { class: 'num night-col', text: C.formatHours(row ? row.nightHours : 0) }),
 						el('th', { class: 'num', text: C.formatHours(row ? row.hours : 0) }),
 						el('th', { class: 'num', text: money(row ? row.tips : 0) }),
 					])),
 				])) : el('p', { class: 'muted', text: t('noWorkInRange') }),
 				pending ? el('p', { class: 'muted small', text: t('mineMissingTotal') }) : null,
 			]);
-			return el('div', { class: 'stack' }, [controls, body]);
 		});
 	}
 

@@ -72,7 +72,7 @@
 			errNightNoHours: 'There are night tips, but nobody has night hours.',
 
 
-			reportPeriod: '1–15 / 16–end',
+			reportPeriod: 'Half-month',
 			reportMonth: 'Month',
 			downloadCsv: 'Download CSV',
 			print: 'Print / PDF',
@@ -90,7 +90,6 @@
 			pickYourNameHelp: 'Pick your name to see your hours and tips for each day. This phone will remember it.',
 			cardMyHours: 'My hours',
 			cardMyTips: 'My tips',
-			mineHelp: 'Compare these hours with what you wrote on paper. Tell the person who enters tips if something is wrong.',
 			daysCount: '{n} days',
 			daysCountOne: '{n} day',
 			noWorkInRange: 'No hours recorded for you in this range.',
@@ -233,7 +232,7 @@
 			errNightNoHours: '저녁 팁이 있는데 저녁 근무 시간이 입력된 서버가 없습니다.',
 
 
-			reportPeriod: '2주 (1–15 / 16–말일)',
+			reportPeriod: '반월',
 			reportMonth: '월',
 			downloadCsv: 'CSV 다운로드',
 			print: '인쇄 / PDF',
@@ -251,7 +250,6 @@
 			pickYourNameHelp: '이름을 고르면 날짜별 근무 시간과 받을 팁이 나옵니다. 이 휴대폰이 기억해 둡니다.',
 			cardMyHours: '내 근무 시간',
 			cardMyTips: '내 팁',
-			mineHelp: '종이에 적은 시간과 비교해 보세요. 다르면 입력한 사람에게 알려주세요.',
 			daysCount: '{n}일',
 			daysCountOne: '{n}일',
 			noWorkInRange: '이 기간에 기록된 근무 시간이 없습니다.',
