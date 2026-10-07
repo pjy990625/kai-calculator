@@ -477,14 +477,10 @@
 
 	function renderEntryTab(seq) {
 		const date = S.entryDate;
-		const p = C.payPeriodFor(date);
-		loadRange(seq, p.from, p.to, function (range) {
+		loadRange(seq, date, date, function (range) {
 			const input = calcInput(range);
 			const rec = input.days.find(function (d) { return d.date === date; }) || null;
-			return el('div', { class: 'stack' }, [
-				renderDayForm(date, rec, input),
-				renderPeriodList(p, input),
-			]);
+			return renderDayForm(date, rec, input);
 		});
 	}
 
@@ -796,19 +792,22 @@
 
 		const form = el('form', { class: 'card', onsubmit: onSave, novalidate: true }, [
 			el('div', { class: 'row date-nav' }, [
-				el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('prevDay'), onclick: function () { S.entryDate = C.addDays(date, -1); render(); } }, '‹'),
-				el('input', {
-					type: 'date', class: 'date-input', value: date, max: S.today, required: true, 'aria-label': t('date'),
-					onchange: function (e) {
-						if (C.isIsoDate(e.target.value)) {
-							S.entryDate = e.target.value;
-							render();
-						} else {
-							e.target.value = date; // iOS "Clear" leaves it empty
-						}
-					},
-				}),
-				el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('nextDay'), disabled: date >= S.today, onclick: function () { S.entryDate = C.addDays(date, 1); render(); } }, '›'),
+				// ‹ date › always stay on one line; Today may drop below on narrow screens.
+				el('div', { class: 'date-step' }, [
+					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('prevDay'), onclick: function () { S.entryDate = C.addDays(date, -1); render(); } }, '‹'),
+					el('input', {
+						type: 'date', class: 'date-input', value: date, max: S.today, required: true, 'aria-label': t('date'),
+						onchange: function (e) {
+							if (C.isIsoDate(e.target.value)) {
+								S.entryDate = e.target.value;
+								render();
+							} else {
+								e.target.value = date; // iOS "Clear" leaves it empty
+							}
+						},
+					}),
+					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('nextDay'), disabled: date >= S.today, onclick: function () { S.entryDate = C.addDays(date, 1); render(); } }, '›'),
+				]),
 				date !== S.today ? el('button', { type: 'button', class: 'btn small', onclick: function () { S.entryDate = S.today; render(); } }, t('today')) : null,
 			]),
 			status,
@@ -824,55 +823,6 @@
 		showShift(S.entryShift);
 		update();
 		return form;
-	}
-
-	function renderPeriodList(p, input) {
-		const s = C.summarize(input, p.from, p.to);
-		const recs = {};
-		input.days.forEach(function (d) { recs[d.date] = d; });
-
-		const body = s.days.map(function (d) {
-			const rec = recs[d.date];
-			return el('tr', {
-				class: 'clickable' + (d.date === S.entryDate ? ' is-current' : ''),
-				tabindex: '0',
-				onclick: function () { S.entryDate = d.date; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); },
-				onkeydown: function (e) { if (e.key === 'Enter') { S.entryDate = d.date; render(); } },
-			}, [
-				el('td', { class: 'nowrap', text: niceDate(d.date, true) }),
-				el('td', { class: 'num', text: money(d.dayTips) }),
-				el('td', { class: 'num', text: d.totalTips === null ? '—' : money(d.nightTips) }),
-				el('td', { class: 'num strong', text: d.totalTips === null ? t('missing') : money(d.totalTips) }),
-				el('td', { class: 'num', text: money(d.pool) }),
-				el('td', { class: 'num', text: rec && rec.editable ? '' : '🔒' }),
-			]);
-		});
-
-		return el('section', { class: 'card' }, [
-			el('div', { class: 'row between' }, [
-				el('h2', { text: t('periodListTitle') }),
-				el('span', { class: 'muted', text: rangeLabel(p.from, p.to) }),
-			]),
-			s.days.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid' }, [
-				el('thead', null, el('tr', null, [
-					el('th', { text: t('date') }),
-					el('th', { class: 'num', text: t('colDayTips') }),
-					el('th', { class: 'num', text: t('colNightTips') }),
-					el('th', { class: 'num', text: t('colTotalTips') }),
-					el('th', { class: 'num', text: t('colServerPool', { pct: S.settings.server_pct }) }),
-					el('th', null, ''),
-				])),
-				el('tbody', null, body),
-				el('tfoot', null, el('tr', null, [
-					el('th', { text: t('total') }),
-					el('th', { class: 'num', text: money(s.totals.dayTips) }),
-					el('th', { class: 'num', text: money(s.totals.nightTips) }),
-					el('th', { class: 'num', text: money(s.totals.tips) }),
-					el('th', { class: 'num', text: money(s.totals.pool) }),
-					el('th', null, ''),
-				])),
-			])) : el('p', { class: 'muted', text: t('noShifts') }),
-		]);
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -1158,7 +1108,7 @@
 						]);
 					})),
 					el('tfoot', null, el('tr', null, [
-						el('th', { text: t('total') + ' (' + t('daysCount', { n: list.length }) + ')' }),
+						el('th', { text: t('total') + ' (' + t(1 === list.length ? 'daysCountOne' : 'daysCount', { n: list.length }) + ')' }),
 						el('th', { class: 'num day-col', text: C.formatHours(row ? row.dayHours : 0) }),
 						el('th', { class: 'num night-col', text: C.formatHours(row ? row.nightHours : 0) }),
 						el('th', { class: 'num', text: C.formatHours(row ? row.hours : 0) }),
