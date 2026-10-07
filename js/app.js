@@ -270,16 +270,47 @@
 		]);
 	}
 
+	/** Gear (settings) icon as inline SVG; it follows the text colour. */
+	function gearIcon() {
+		const NS = 'http://www.w3.org/2000/svg';
+		const svg = document.createElementNS(NS, 'svg');
+		[['viewBox', '0 0 24 24'], ['width', '22'], ['height', '22'], ['fill', 'none'], ['stroke', 'currentColor'],
+			['stroke-width', '2'], ['stroke-linecap', 'round'], ['stroke-linejoin', 'round'], ['aria-hidden', 'true']]
+			.forEach(function (a) { svg.setAttribute(a[0], a[1]); });
+		const circle = document.createElementNS(NS, 'circle');
+		circle.setAttribute('cx', '12');
+		circle.setAttribute('cy', '12');
+		circle.setAttribute('r', '3');
+		const path = document.createElementNS(NS, 'path');
+		path.setAttribute('d', 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z');
+		svg.appendChild(circle);
+		svg.appendChild(path);
+		return svg;
+	}
+
 	function renderShell() {
 		const name = S.settings && S.settings.restaurant_name;
 		document.title = (name ? name + ' · ' : '') + t('appTitle');
 		document.getElementById('app-title').textContent = name || t('appTitle');
-		const sub = document.getElementById('app-subtitle');
-		sub.replaceChildren();
-		appendChildren(sub, [
-			S.role ? el('span', { class: 'badge ' + (isAdmin() ? 'admin' : 'on'), text: isAdmin() ? t('roleAdmin') : t('roleStaff') }) : null,
-			' ' + t('appSubtitle'),
-		]);
+		// Right end of the header: role badge, then the settings (gear) button.
+		const actions = document.getElementById('brand-actions');
+		actions.replaceChildren();
+		if (S.role) {
+			appendChildren(actions, [
+				el('span', { class: 'badge ' + (isAdmin() ? 'admin' : 'on'), text: isAdmin() ? t('roleAdmin') : t('roleStaff') }),
+				el('button', {
+					type: 'button',
+					class: 'icon-btn' + ('settings' === S.tab ? ' is-on' : ''),
+					'aria-label': t('tabSettings'),
+					title: t('tabSettings'),
+					'aria-pressed': 'settings' === S.tab ? 'true' : 'false',
+					onclick: function () {
+						S.tab = 'settings';
+						render();
+					},
+				}, gearIcon()),
+			]);
+		}
 		const tabs = document.getElementById('tabs');
 		if (!S.role) {
 			tabs.replaceChildren();
@@ -290,7 +321,6 @@
 			['mine', t('tabMine')],
 			['report', t('tabReport')],
 			['staff', t('tabStaff')],
-			['settings', t('tabSettings')],
 		].map(function (tb) {
 			return el('button', {
 				type: 'button',
@@ -484,7 +514,7 @@
 			value: rec ? C.centsToPlain(rec.dayTips) : '', disabled: !!locked, oninput: onInput('day'),
 		});
 		const totalInput = el('input', {
-			id: 'total-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: t('totalPlaceholder'),
+			id: 'total-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0.00',
 			value: rec && rec.totalTips !== null ? C.centsToPlain(rec.totalTips) : '', disabled: !!locked, oninput: onInput('night'),
 		});
 		const nightOut = el('output', { id: 'night-tips', class: 'computed' }, '—');
@@ -725,9 +755,7 @@
 
 		const saveBtn = el('button', { type: 'submit', class: 'btn primary' }, t('save'));
 
-		const status = locked
-			? el('p', { class: 'notice lock', text: '🔒 ' + locked })
-			: el('p', { class: 'status', text: rec ? t('editingExisting') : t('newRecord') });
+		const status = locked ? el('p', { class: 'notice lock', text: '🔒 ' + locked }) : null;
 
 		// The two tabs. Both panels stay in the page (one hidden), so switching
 		// tabs never throws away what was typed.

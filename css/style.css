@@ -86,8 +86,17 @@ p { margin: .25rem 0 .75rem; }
 }
 .topbar-inner { padding-top: 12px; }
 .brand { display: flex; gap: 12px; align-items: center; }
-.brand h1 { font-size: 1.1rem; }
-.brand p { margin: 0; font-size: .85rem; }
+.brand h1 { font-size: 1.1rem; margin: 0; }
+.brand-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.icon-btn {
+	width: 40px; height: 40px; flex: none;
+	display: grid; place-items: center;
+	border: 1px solid transparent; border-radius: var(--radius-sm);
+	background: none; color: var(--muted);
+	cursor: pointer;
+}
+.icon-btn:hover { background: var(--surface-2); color: var(--text); }
+.icon-btn.is-on { color: var(--accent); background: var(--accent-soft); }
 .logo {
 	width: 36px; height: 36px; flex: none;
 	border-radius: 10px;
