@@ -358,11 +358,16 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	font-variant-numeric: tabular-nums;
 }
 .split-line { font-weight: 600; color: var(--accent); min-height: 1.5em; margin: 0 0 4px; } /* height kept while empty */
+/* Auto-save status: between the tips field and the table. Height kept so the table never jumps. */
+.save-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 1.5em; margin: 0 0 4px; font-size: .85rem; font-weight: 600; color: var(--muted); }
+.save-status.saved { color: var(--accent); }
+.save-status.blocked, .save-status.failed { color: var(--danger); }
+.save-status .btn { flex: none; }
 .notice.lock, .notice.info { background: var(--surface-2); border: 1px solid var(--line); }
 .notice.info { font-weight: 500; }
 .entry-grid small { font-weight: 400; font-size: .75rem; }
 .entry-grid small .part { white-space: nowrap; }
-.notice[hidden] { display: none; }
+.notice[hidden], .row[hidden] { display: none; }
 input:disabled { opacity: .65; background: var(--surface-2); }
 .badge.admin { background: var(--night-soft); color: var(--night); }
 .facts { margin: 0 0 16px; padding-left: 18px; color: var(--muted); }

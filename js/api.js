@@ -39,7 +39,8 @@
 		return h;
 	}
 
-	async function rpc(fn, args) {
+	/** `opts.keepalive`: let the request finish even if the page is closed (auto-save on leaving). */
+	async function rpc(fn, args, opts) {
 		// AbortController is missing on very old phones (iOS < 12.1); they just get no timeout.
 		const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
 		const timer = ctrl ? setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS) : null;
@@ -51,6 +52,7 @@
 				body: JSON.stringify(args || {}),
 				signal: ctrl ? ctrl.signal : undefined,
 				cache: 'no-store',
+				keepalive: !!(opts && opts.keepalive),
 			});
 		} catch (e) {
 			throw new ApiError(e && e.name === 'AbortError' ? 'timeout' : 'network', String(e && e.message));

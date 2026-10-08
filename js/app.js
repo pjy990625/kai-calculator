@@ -36,6 +36,9 @@
 	};
 	let lang = 'en';
 	let renderSeq = 0;
+	// The open entry form ({flush, leave, date, unsaved}), so leaving it can save first.
+	let entryForm = null;
+	const AUTOSAVE_MS = 1500;
 
 	/* ------------------------------------------------------------------ */
 	/* Small helpers                                                       */
@@ -202,6 +205,7 @@
 	/* ------------------------------------------------------------------ */
 
 	function clearSession() {
+		entryForm = null;
 		S.token = null;
 		S.role = null;
 		lsRemove(TOKEN_KEY);
@@ -337,6 +341,24 @@
 	}
 
 	function render() {
+		// The entry form saves what was typed before it is replaced.
+		if (entryForm) {
+			const form = entryForm;
+			const wait = form.leave();
+			if (false === wait) {
+				// The user chose to stay and fix it: put the tab and date back.
+				S.tab = 'entry';
+				S.entryDate = form.date;
+				renderShell();
+				return;
+			}
+			entryForm = null;
+			if (wait) {
+				renderShell();
+				wait.then(render);
+				return;
+			}
+		}
 		renderShell();
 		const seq = ++renderSeq;
 		if ('report' === S.tab) {
@@ -497,12 +519,13 @@
 			return s.active || myHours.some(function (h) { return h.serverId === s.id; });
 		});
 
-		// Which tab has been typed in since the form was drawn.
+		// Which tab has been typed in and not saved yet.
 		const dirty = { day: false, night: false };
 		function onInput(shift) {
 			return function () {
 				dirty[shift] = true;
 				update();
+				scheduleSave();
 			};
 		}
 
@@ -670,47 +693,143 @@
 			return null;
 		}
 
-		async function onSave(ev) {
-			ev.preventDefault();
-			const f = readForm();
-			const active = S.entryShift;
-			const other = 'day' === active ? 'night' : 'day';
-			// Save the tab on screen — and the other one too if something was typed
-			// there, so nothing typed is lost. A tab nobody touched is NOT sent: the
-			// database keeps what it has (maybe newer, from another phone).
-			const saving = { day: 'day' === active || dirty.day, night: 'night' === active || dirty.night };
-			const order = [active, other];
+		/* Auto-save: 1.5 s after typing stops, and right away when a field is
+		 * left, the date or tab changes, or the app goes to the background.
+		 * Only the tabs typed in are sent; an untouched tab keeps what the
+		 * database has (maybe newer, from another phone). */
+		let timer = null;
+		let inFlight = null;   // the save being sent
+		let again = false;     // typed while a save was being sent → save once more
+		let alive = true;      // false once this form is replaced
+		let blocked = null;    // why the typed values can't be saved yet
+
+		function scheduleSave() {
+			clearTimeout(timer);
+			timer = setTimeout(function () { saveNow(); }, AUTOSAVE_MS);
+			setStatus('saving');
+		}
+
+		/** The first problem in the tabs being saved, active tab first. */
+		function firstProblem(f, saving) {
+			const order = 'day' === S.entryShift ? ['day', 'night'] : ['night', 'day'];
 			for (let i = 0; i < order.length; i++) {
 				const problem = saving[order[i]] ? problemIn(order[i], f, saving) : null;
 				if (problem) {
-					showShift(order[i]); // the problem may be on the tab that is not on screen
-					toast(problem.msg, 'error');
-					if (problem.focus) {
-						problem.focus.focus();
-					}
-					return;
+					return problem;
 				}
 			}
-			if (!(await stillOpen())) {
+			return null;
+		}
+
+		/** Save what was typed now. Returns the save's promise, or null if nothing was sent. */
+		function saveNow(keepalive) {
+			clearTimeout(timer);
+			timer = null;
+			if (inFlight) {
+				again = again || dirty.day || dirty.night;
+				return inFlight;
+			}
+			if (!dirty.day && !dirty.night) {
+				return null;
+			}
+			const f = readForm();
+			const sent = { day: dirty.day, night: dirty.night };
+			const problem = firstProblem(f, sent);
+			blocked = problem;
+			if (problem) {
+				setStatus('blocked', problem.msg);
+				return null;
+			}
+			dirty.day = false;
+			dirty.night = false;
+			setStatus('saving');
+			inFlight = API.rpc('save_shifts', {
+				p_token: S.token,
+				p_date: date,
+				p_day_tips_cents: sent.day ? f.dayTips : null,
+				p_day_hours: sent.day ? f.hours.day : null,
+				p_total_tips_cents: sent.night ? f.totalTips : null,
+				p_night_hours: sent.night ? f.hours.night : null,
+			}, { keepalive: !!keepalive }).then(function () {
+				actionsRow.hidden = false; // the record exists now: it can be deleted
+				if (!dirty.day && !dirty.night) {
+					setStatus('saved');
+				}
+			}, function (e) {
+				dirty.day = dirty.day || sent.day;
+				dirty.night = dirty.night || sent.night;
+				onSaveError(e);
+			}).then(function () {
+				inFlight = null;
+				if (again && alive) {
+					again = false;
+					saveNow();
+				}
+			});
+			return inFlight;
+		}
+
+		function onSaveError(e) {
+			if (e && ('locked' === e.code || 'date_locked' === e.code)) {
+				// Midnight passed (staff): the day is closed and can't be saved any more.
+				dirty.day = false;
+				dirty.night = false;
+				again = false;
+				toast(t('err_locked'), 'error');
+				if (alive) {
+					refreshBootstrap().catch(function () {}).then(render);
+				}
 				return;
 			}
-			await busy(saveBtn, async function () {
-				try {
-					await API.rpc('save_shifts', {
-						p_token: S.token,
-						p_date: date,
-						p_day_tips_cents: saving.day ? f.dayTips : null,
-						p_day_hours: saving.day ? f.hours.day : null,
-						p_total_tips_cents: saving.night ? f.totalTips : null,
-						p_night_hours: saving.night ? f.hours.night : null,
-					});
-				} catch (e) {
-					handleError(e);
-					return;
+			if (e && e.code === 'not_authenticated') {
+				handleError(e);
+				return;
+			}
+			if (alive) {
+				setStatus('failed', errMessage(e)); // e.g. no connection, or the database needs updating
+			} else {
+				toast(errMessage(e), 'error'); // the form is gone: say so instead
+			}
+		}
+
+		/** One status line per tab, between the tips field and the table. */
+		const statusLines = { day: el('p', { class: 'save-status', role: 'status', 'aria-live': 'polite' }), night: el('p', { class: 'save-status', role: 'status', 'aria-live': 'polite' }) };
+		function setStatus(kind, msg) {
+			C.SHIFTS.forEach(function (shift) {
+				const line = statusLines[shift];
+				line.className = 'save-status ' + kind;
+				if ('saving' === kind) {
+					line.replaceChildren(t('autoSaving'));
+				} else if ('saved' === kind) {
+					line.replaceChildren(t('autoSaved', { time: new Intl.DateTimeFormat(locale(), { hour: 'numeric', minute: '2-digit' }).format(new Date()) }));
+				} else if ('blocked' === kind) {
+					line.replaceChildren(t('autoBlocked', { reason: msg }));
+				} else if ('failed' === kind) {
+					line.replaceChildren(t('autoFailed', { reason: msg }) + ' ', el('button', { type: 'button', class: 'btn small', onclick: function () { saveNow(); } }, t('retry')));
+				} else {
+					line.replaceChildren();
 				}
-				toast(t('saved'));
-				render();
 			});
+		}
+
+		/**
+		 * Leaving this form (another date or tab). Saves what was typed first.
+		 * Returns false to stay (the user chose to fix something), a promise to
+		 * wait for, or null.
+		 */
+		function leave() {
+			saveNow();
+			if (blocked && (dirty.day || dirty.night) && !window.confirm(t('leaveUnsaved', { reason: blocked.msg }))) {
+				dateInput.value = date;
+				return false;
+			}
+			alive = false;
+			return inFlight;
+		}
+
+		function onSubmit(ev) {
+			ev.preventDefault(); // Enter / the keyboard's Go key saves now
+			saveNow();
 		}
 
 		/**
@@ -737,8 +856,12 @@
 		}
 
 		async function onDelete() {
+			clearTimeout(timer);
 			if (!window.confirm(t('confirmDeleteDay', { date: niceDate(date, true) })) || !(await stillOpen())) {
 				return;
+			}
+			if (inFlight) {
+				await inFlight; // don't let a late save bring the record back
 			}
 			try {
 				await API.rpc('delete_day', { p_token: S.token, p_date: date });
@@ -746,11 +869,18 @@
 				handleError(e);
 				return;
 			}
+			dirty.day = false;
+			dirty.night = false;
+			blocked = null;
 			toast(t('deleted'));
 			render();
 		}
 
-		const saveBtn = el('button', { type: 'submit', class: 'btn primary' }, t('save'));
+		let dateInput = null;
+		// No Save button: changes save themselves (status line in each tab).
+		const actionsRow = el('div', { class: 'row actions', hidden: !rec }, [
+			el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')),
+		]);
 
 		const status = locked ? el('p', { class: 'notice lock', text: '🔒 ' + locked }) : null;
 
@@ -762,6 +892,7 @@
 				el('div', { class: 'tips-grid' }, [
 					el('label', { class: 'field' }, [el('span', { text: t('dayTips') }), dayTipsInput]),
 				]),
+				locked ? null : statusLines.day,
 				leftoverOut.day,
 				hoursTable('day', t('share')),
 			]),
@@ -770,6 +901,7 @@
 					el('label', { class: 'field' }, [el('span', { text: t('totalTips') }), totalInput]),
 					el('div', { class: 'field' }, [el('span', { text: t('nightTipsAuto') }), nightOut]),
 				]),
+				locked ? null : statusLines.night,
 				totalHint,
 				leftoverOut.night,
 				hoursTable('night', t('shareWholeDay')),
@@ -791,12 +923,12 @@
 			}, 'day' === k ? '☀ ' + t('dayTips') : '☾ ' + t('nightTips'));
 		});
 
-		const form = el('form', { class: 'card', onsubmit: onSave, novalidate: true }, [
+		const form = el('form', { class: 'card', onsubmit: onSubmit, novalidate: true }, [
 			el('div', { class: 'row date-nav' }, [
 				// ‹ date › always stay on one line; Today may drop below on narrow screens.
 				el('div', { class: 'date-step' }, [
 					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('prevDay'), onclick: function () { S.entryDate = C.addDays(date, -1); render(); } }, '‹'),
-					el('input', {
+					dateInput = el('input', {
 						type: 'date', class: 'date-input', value: date, max: S.today, required: true, 'aria-label': t('date'),
 						onchange: function (e) {
 							if (C.isIsoDate(e.target.value)) {
@@ -816,12 +948,20 @@
 			panels.day,
 			panels.night,
 			el('p', { class: 'muted small', text: t('hoursHelp') }),
-			// Delete on the left of Save; Save at the right end.
-			locked ? null : el('div', { class: 'row actions' }, [
-				rec ? el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')) : null,
-				saveBtn,
-			]),
+			locked ? null : actionsRow,
 		]);
+		// Leaving a field saves it right away (no need to wait 1.5 s).
+		form.addEventListener('focusout', function () {
+			if (timer) {
+				saveNow();
+			}
+		});
+		entryForm = locked ? null : {
+			flush: saveNow,
+			leave: leave,
+			date: date,
+			unsaved: function () { return dirty.day || dirty.night; }, // typed but not sendable
+		};
 		// Opening a date picks its tab: nothing saved → Day tips; day AND night
 		// saved → Night tips; only the day saved → the tab that was open. Redraws
 		// of the same date (e.g. after Save) keep the tab the user is on.
@@ -1341,6 +1481,9 @@
 	// and the session silently. Never re-render here — that would wipe
 	// what the user was typing.
 	document.addEventListener('visibilitychange', function () {
+		if ('hidden' === document.visibilityState && entryForm) {
+			entryForm.flush(true); // switching apps / locking the phone: save now
+		}
 		if ('visible' === document.visibilityState && S.role) {
 			const before = S.today;
 			refreshBootstrap().then(function () {
@@ -1352,6 +1495,22 @@
 					handleError(e);
 				}
 			});
+		}
+	});
+
+	// Closing the tab or reloading: save now, and warn if something is not saved.
+	window.addEventListener('pagehide', function () {
+		if (entryForm) {
+			entryForm.flush(true);
+		}
+	});
+	window.addEventListener('beforeunload', function (ev) {
+		if (entryForm) {
+			entryForm.flush(true);
+			if (entryForm.unsaved()) {
+				ev.preventDefault();
+				ev.returnValue = '';
+			}
 		}
 	});
 
