@@ -17,6 +17,7 @@
 	--danger-soft: #fee2e2;
 	--warn-soft: #fff7ed;
 	--warn-line: #fdba74;
+	--scroll-shade: rgba(0, 0, 0, .16);
 	--radius: 12px;
 	--radius-sm: 8px;
 	--shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 4px 16px rgba(0, 0, 0, .04);
@@ -41,6 +42,7 @@
 		--danger-soft: #3b1515;
 		--warn-soft: #33220f;
 		--warn-line: #9a5b1c;
+		--scroll-shade: rgba(255, 255, 255, .14); /* a dark shadow would not show on a dark card */
 		--shadow: none;
 	}
 }
@@ -204,11 +206,22 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 
 /* Tables */
 
-.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -4px; }
-table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.table-wrap {
+	overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -4px;
+	/* "More columns this way": a shadow on the right edge while the table can still scroll.
+	   The surface-colored cover moves with the content (local) and hides the shadow at the end. */
+	background:
+		linear-gradient(to left, var(--surface) 16px, transparent) right center / 32px 100% no-repeat local,
+		linear-gradient(to left, var(--scroll-shade), transparent) right center / 16px 100% no-repeat scroll;
+}
+/* separate + spacing 0 (not collapse): with collapse, Chrome draws the row lines of the
+   sticky first column half a pixel off from the rest of the row. */
+table.grid { width: 100%; border-collapse: separate; border-spacing: 0; font-variant-numeric: tabular-nums; }
 .grid th, .grid td { padding: 8px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
 .grid thead th { font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); font-weight: 600; white-space: nowrap; }
 .grid tfoot th { border-bottom: 0; border-top: 2px solid var(--line); }
+/* Separate borders add up: the last body row has no line of its own above the footer's 2px line. */
+.grid tbody:not(:last-child) tr:last-child > * { border-bottom: 0; }
 .grid .num { text-align: right; }
 .report-grid td, .report-grid th { white-space: nowrap; }
 .report-grid .name { font-weight: 600; }
@@ -255,14 +268,6 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .stat-value { font-size: 1.15rem; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .stat.accent { background: var(--accent-soft); }
 .cards.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-button.link {
-	font: inherit; font-weight: 600;
-	color: var(--accent);
-	background: none; border: 0;
-	padding: 10px 0; margin: -10px 0; /* bigger tap area, same row height */
-	text-decoration: underline; text-underline-offset: 3px;
-	cursor: pointer;
-}
 /* Tablets: one-column screens stay a comfortable width, centered (reports use the full width for their tables). */
 .narrow { max-width: 720px; margin-left: auto; margin-right: auto; width: 100%; }
 /* My hours: name + dropdown on one line, then period controls. */
@@ -398,6 +403,9 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.entry-grid small .part { display: block; }
 	.entry-grid small .sep { display: none; }
 	.report-head h2 { font-size: 1.2rem; }
+	/* My hours / Reports: Bi-weekly·Monthly switch and ‹ range › centered, one above the other. */
+	.range-bar { flex-direction: column; align-items: center; }
+	.range-bar .row.nav { flex: none; justify-content: center; }
 }
 
 /* Phone held sideways: little height, so the header scrolls away instead of staying on top. */
@@ -419,7 +427,7 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.print-only { display: block; }
 	.topbar { position: static; border: 0; }
 	.card { border: 0; box-shadow: none; padding: 0; }
-	.table-wrap { overflow: visible; }
+	.table-wrap { overflow: visible; background: none; }
 	main { padding: 0; }
 }
 

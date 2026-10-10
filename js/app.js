@@ -1206,20 +1206,7 @@
 				el('th', { class: 'num', text: t('colHours') }),
 			])),
 			el('tbody', null, rows.map(function (r) {
-				const name = r.name || t('unknownServer');
-				return el('tr', null, [el('td', { class: 'name' }, r.name ? el('button', {
-					type: 'button',
-					class: 'link',
-					title: t('openPerson', { name: name }),
-					onclick: function () {
-						S.mineId = r.id;
-						S.mineKind = S.reportKind;
-						S.mineDate = S.reportDate;
-						S.tab = 'mine';
-						render();
-						window.scrollTo(0, 0);
-					},
-				}, name) : name)].concat(cells(r, 'td')));
+				return el('tr', null, [el('td', { class: 'name', text: r.name || t('unknownServer') })].concat(cells(r, 'td')));
 			})),
 			el('tfoot', null, el('tr', null, [el('th', { text: t('total') })].concat(cells({
 				tips: tot.serverTips, hours: tot.hours,
