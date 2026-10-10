@@ -41,6 +41,20 @@
 
 	/** `opts.keepalive`: let the request finish even if the page is closed (auto-save on leaving). */
 	async function rpc(fn, args, opts) {
+		try {
+			return await send(fn, args, opts);
+		} catch (e) {
+			// Let the app record unexpected errors (see the error log in app.js).
+			if (typeof api.onError === 'function') {
+				try {
+					api.onError(e, fn);
+				} catch (ignore) { /* logging must never break the call */ }
+			}
+			throw e;
+		}
+	}
+
+	async function send(fn, args, opts) {
 		// AbortController is missing on very old phones (iOS < 12.1); they just get no timeout.
 		const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
 		const timer = ctrl ? setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS) : null;
@@ -77,5 +91,6 @@
 		return body;
 	}
 
-	window.KaiApi = { configured: configured, rpc: rpc, ApiError: ApiError };
+	const api = { configured: configured, rpc: rpc, ApiError: ApiError, onError: null };
+	window.KaiApi = api;
 }());

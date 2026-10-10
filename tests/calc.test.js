@@ -178,6 +178,13 @@ test('per-server daily breakdown matches the per-person totals', () => {
 	assert.equal(s.serverDays.a.length, 10); // Alice skipped every third day
 	assert.equal(s.serverDays.a[0].date, '2026-10-02');
 	assert.equal(s.serverDays.c[0].nightHours, 375);
+	// Per day: paid = what servers got that day; per hour = paid / that day's hours.
+	for (const d of s.days) {
+		const paid = s.rows.reduce((a, r) => a + (s.serverDays[r.id].find((x) => x.date === d.date) || { tips: 0 }).tips, 0);
+		assert.equal(d.paid, paid, d.date + ' paid');
+		assert.equal(d.paid + d.leftover, d.pool, d.date + ' paid + leftover = pool');
+		assert.equal(d.perHourCents, Math.round(d.paid * 100 / (d.dayHours + d.nightHours)));
+	}
 });
 
 test('range filter is inclusive', () => {

@@ -15,7 +15,7 @@
 --   * All tables live in the `private` schema, which the Supabase API
 --     does not expose. The browser can only call the public.* functions
 --     below, and every rule (password, staff can only change today's
---     record, admin-only actions, 3-month retention) is enforced here,
+--     record, admin-only actions, 1-year retention) is enforced here,
 --     not in the browser.
 --   * Passwords are stored as bcrypt hashes. Session tokens are random;
 --     only their SHA-256 is stored.
@@ -36,11 +36,15 @@ create table if not exists private.config (
 	server_pct        int  not null default 60 check (server_pct between 1 and 100),
 	period_anchor     date not null default '2026-01-05',
 	timezone          text not null default 'America/Los_Angeles',
-	retention_months  int  not null default 3 check (retention_months between 1 and 24),
+	retention_months  int  not null default 12 check (retention_months between 1 and 24),
 	staff_hash        text,
 	admin_hash        text
 );
 insert into private.config (id) values (1) on conflict (id) do nothing;
+-- Older versions kept records for 3 months. Keep them for 1 year now.
+-- (Records already deleted before this change cannot come back.)
+alter table private.config alter column retention_months set default 12;
+update private.config set retention_months = 12 where id = 1 and retention_months < 12;
 -- Older versions let staff edit for N hours after the first save. Staff can
 -- now edit until the end of the record's own date, so the setting is gone.
 alter table private.config drop column if exists edit_window_hours;
@@ -97,6 +101,21 @@ create table if not exists private.audit_log (
 	detail jsonb
 );
 
+-- Errors the app ran into (failed saves, lost connection, app bugs), so the
+-- admin can see what went wrong on someone's phone. Kept for 90 days.
+create table if not exists private.error_log (
+	id         bigint generated always as identity primary key,
+	at         timestamptz not null default now(),  -- when the database received it
+	client_at  timestamptz,                          -- when it happened on the phone
+	role       text not null,
+	code       text not null,
+	message    text,
+	context    text,
+	page       text,
+	user_agent text
+);
+create index if not exists error_log_at on private.error_log (at);
+
 -- Defense in depth: RLS on, and no policies → no direct access at all.
 alter table private.config         enable row level security;
 alter table private.servers        enable row level security;
@@ -105,6 +124,7 @@ alter table private.hours          enable row level security;
 alter table private.sessions       enable row level security;
 alter table private.login_attempts enable row level security;
 alter table private.audit_log      enable row level security;
+alter table private.error_log      enable row level security;
 
 -- ---------------------------------------------------------------------
 -- Internal helpers (not callable from the API)
@@ -230,6 +250,7 @@ begin
 	delete from private.sessions s where s.expires_at <= now();
 	delete from private.login_attempts a where a.at < now() - interval '1 day';
 	delete from private.audit_log l where l.at < now() - make_interval(months => v_months);
+	delete from private.error_log e where e.at < now() - interval '90 days';
 end;
 $$;
 
@@ -654,6 +675,7 @@ begin
 end;
 $$;
 
+-- Staff can add servers, but only the admin can change an existing name.
 create or replace function public.rename_server(p_token text, p_id uuid, p_name text)
 returns json
 language plpgsql
@@ -661,10 +683,10 @@ security definer
 set search_path = ''
 as $$
 declare
-	v_role text := private.session_role(p_token);
 	v_name text := private.clean_name(p_name);
 	v_old text;
 begin
+	perform private.require_admin(p_token);
 	if char_length(v_name) not between 1 and 60 then
 		perform private.fail('invalid_name');
 	end if;
@@ -676,7 +698,7 @@ begin
 		perform private.fail('duplicate_name');
 	end if;
 	update private.servers s set name = v_name where s.id = p_id;
-	perform private.log(v_role, 'rename_server', jsonb_build_object('id', p_id, 'from', v_old, 'to', v_name));
+	perform private.log('admin', 'rename_server', jsonb_build_object('id', p_id, 'from', v_old, 'to', v_name));
 	return private.server_json(p_id);
 end;
 $$;
@@ -786,6 +808,77 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------
+-- Error log
+-- ---------------------------------------------------------------------
+
+-- The app sends the errors it ran into (up to 20 at a time). Only a
+-- logged-in phone can write, and at most 200 entries per hour are kept,
+-- so the public API key can't be used to flood the table.
+create or replace function public.log_errors(p_token text, p_entries jsonb)
+returns json
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+	v_role text := private.session_role(p_token);
+	v_room int;
+	v_added int;
+begin
+	if p_entries is null or jsonb_typeof(p_entries) <> 'array' then
+		return json_build_object('ok', true, 'added', 0);
+	end if;
+	v_room := greatest(0, 200 - (select count(*) from private.error_log e where e.at > now() - interval '1 hour'));
+	insert into private.error_log (client_at, role, code, message, context, page, user_agent)
+	select
+		case when x->>'at' ~ '^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$' then (x->>'at')::timestamptz end,
+		v_role,
+		left(coalesce(nullif(x->>'code', ''), 'unknown'), 40),
+		left(x->>'message', 1000),
+		left(x->>'context', 2000),
+		left(x->>'page', 40),
+		left(x->>'ua', 300)
+	from jsonb_array_elements(p_entries) with ordinality as e(x, n)
+	where jsonb_typeof(x) = 'object' and n <= least(20, v_room);
+	get diagnostics v_added = row_count;
+	return json_build_object('ok', true, 'added', v_added);
+end;
+$$;
+
+create or replace function public.get_error_log(p_token text)
+returns json
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+begin
+	perform private.require_admin(p_token);
+	return coalesce((
+		select json_agg(json_build_object(
+			'at', coalesce(e.client_at, e.at), 'role', e.role, 'code', e.code, 'message', e.message,
+			'context', e.context, 'page', e.page, 'ua', e.user_agent
+		) order by e.id desc)
+		from (select * from private.error_log order by id desc limit 500) e
+	), '[]'::json);
+end;
+$$;
+
+create or replace function public.clear_error_log(p_token text)
+returns json
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+	perform private.require_admin(p_token);
+	delete from private.error_log;
+	perform private.log('admin', 'clear_error_log', null);
+	return json_build_object('ok', true);
+end;
+$$;
+
+-- ---------------------------------------------------------------------
 -- Permissions: nothing in `private` is reachable from the API;
 -- only the public functions above can be called.
 -- ---------------------------------------------------------------------
@@ -812,7 +905,7 @@ begin
 		where n.nspname = 'public'
 			and p.proname in ('login', 'logout', 'get_bootstrap', 'get_range', 'save_shifts', 'save_day', 'delete_day',
 				'add_server', 'rename_server', 'set_server_active', 'delete_server',
-				'update_settings', 'change_password')
+				'update_settings', 'change_password', 'log_errors', 'get_error_log', 'clear_error_log')
 	loop
 		execute format('revoke all on function %s from public', r.sig);
 		if v_api_roles is not null then

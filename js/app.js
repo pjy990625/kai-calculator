@@ -68,6 +68,103 @@
 		} catch (e) { /* ignore */ }
 	}
 
+	/* ------------------------------------------------------------------ */
+	/* Error log — unexpected errors are kept on this phone and sent to    */
+	/* the database (public.log_errors). The admin sees them in Settings.  */
+	/* ------------------------------------------------------------------ */
+
+	const ERRLOG_KEY = 'kai-calculator:errors';
+	const ERRLOG_KEEP = 30;
+	// Normal answers from the database (wrong input, locked day, …), not problems.
+	const EXPECTED_ERRORS = [
+		'not_authenticated', 'admin_only', 'invalid_date', 'future_date', 'too_old', 'locked', 'date_locked',
+		'invalid_tips', 'invalid_hours', 'unknown_server', 'not_found', 'invalid_name', 'duplicate_name',
+		'server_has_hours', 'invalid_settings', 'invalid_password', 'password_conflict', 'invalid_range',
+	];
+	let errQueue = null;   // not sent yet (also kept in localStorage, so a reload or no signal loses nothing)
+	let errTimer = null;
+	let errSending = false;
+
+	function errorQueue() {
+		if (!errQueue) {
+			try {
+				const saved = JSON.parse(lsGet(ERRLOG_KEY) || '[]');
+				errQueue = Array.isArray(saved) ? saved : [];
+			} catch (e) {
+				errQueue = [];
+			}
+		}
+		return errQueue;
+	}
+
+	function saveErrorQueue() {
+		if (errQueue.length) {
+			lsSet(ERRLOG_KEY, JSON.stringify(errQueue));
+		} else {
+			lsRemove(ERRLOG_KEY);
+		}
+	}
+
+	function logError(code, message, context) {
+		const q = errorQueue();
+		q.push({
+			id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+			at: new Date().toISOString(),
+			code: String(code || 'unknown').slice(0, 40),
+			message: String(message || '').slice(0, 1000),
+			context: String(context || '').slice(0, 2000),
+			page: String(S.tab || ''),
+			ua: String(navigator.userAgent || '').slice(0, 300),
+		});
+		errQueue = q.slice(-ERRLOG_KEEP);
+		saveErrorQueue();
+		clearTimeout(errTimer);
+		errTimer = setTimeout(flushErrors, 2000);
+	}
+
+	/** Send what is waiting. Quietly gives up (and tries later) when offline or logged out. */
+	async function flushErrors() {
+		if (errSending || !S.token || !errorQueue().length) {
+			return;
+		}
+		const batch = errorQueue().slice(0, 20);
+		errSending = true;
+		try {
+			await API.rpc('log_errors', { p_token: S.token, p_entries: batch });
+		} catch (e) {
+			errSending = false;
+			return;
+		}
+		errSending = false;
+		const sent = batch.map(function (x) { return x.id; });
+		errQueue = errorQueue().filter(function (x) { return sent.indexOf(x.id) < 0; });
+		saveErrorQueue();
+		if (errQueue.length) {
+			flushErrors();
+		}
+	}
+
+	API.onError = function (e, fn) {
+		if ('log_errors' === fn || (e && EXPECTED_ERRORS.indexOf(e.code) >= 0)) {
+			return;
+		}
+		logError(e && e.code, e && (e.detail || e.message), 'rpc ' + fn);
+	};
+	window.addEventListener('error', function (ev) {
+		if (!ev.message || 'Script error.' === ev.message) {
+			return; // no details (e.g. a browser extension)
+		}
+		logError('js', ev.message, (ev.filename || '') + ':' + ev.lineno + ':' + ev.colno + (ev.error && ev.error.stack ? '\n' + ev.error.stack : ''));
+	});
+	window.addEventListener('unhandledrejection', function (ev) {
+		const r = ev.reason;
+		if (r instanceof API.ApiError) {
+			return; // already recorded by API.onError
+		}
+		logError('js', r && r.message ? r.message : String(r), r && r.stack ? r.stack : 'unhandled promise');
+	});
+	window.addEventListener('online', function () { flushErrors(); });
+
 	function el(tag, props, children) {
 		const node = document.createElement(tag);
 		if (props) {
@@ -218,6 +315,7 @@
 		S.retentionStart = b.retention_start;
 		S.settings = b.settings;
 		S.servers = C.sortServers(b.servers || []); // always alphabetical
+		setTimeout(flushErrors, 0); // signed in and online: send errors saved earlier
 		if (!S.entryDate) {
 			S.entryDate = S.today;
 		}
@@ -1075,7 +1173,6 @@
 			return [
 				el(tag, { class: 'num strong', text: money(r.tips) }),
 				el(tag, { class: 'num', text: C.formatHours(r.hours) }),
-				el(tag, { class: 'num muted', text: money(r.perHourCents) }),
 			];
 		}
 		return el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
@@ -1083,7 +1180,6 @@
 				el('th', { text: t('server') }),
 				el('th', { class: 'num', text: t('colTips') }),
 				el('th', { class: 'num', text: t('colHours') }),
-				el('th', { class: 'num', text: t('colPerHour') }),
 			])),
 			el('tbody', null, rows.map(function (r) {
 				const name = r.name || t('unknownServer');
@@ -1102,7 +1198,7 @@
 				}, name) : name)].concat(cells(r, 'td')));
 			})),
 			el('tfoot', null, el('tr', null, [el('th', { text: t('total') })].concat(cells({
-				tips: tot.serverTips, hours: tot.hours, perHourCents: tot.perHourCents,
+				tips: tot.serverTips, hours: tot.hours,
 			}, 'th')))),
 		]));
 	}
@@ -1115,6 +1211,7 @@
 				el('th', { class: 'num day-col', text: t('colDayTips') }),
 				el('th', { class: 'num night-col', text: t('colNightTips') }),
 				el('th', { class: 'num', text: t('colServerPool', { pct: s.serverPct }) }),
+				el('th', { class: 'num', text: t('colPerHour') }),
 				el('th', { class: 'num', text: t('colKitchen', { pct: 100 - s.serverPct }) }),
 				el('th', { class: 'num', text: t('colLeftover') }),
 			])),
@@ -1125,6 +1222,7 @@
 					el('td', { class: 'num day-col', text: money(d.dayTips) }),
 					el('td', { class: 'num night-col', text: d.totalTips === null ? '—' : money(d.nightTips) }),
 					el('td', { class: 'num', text: money(d.pool) }),
+					el('td', { class: 'num muted', text: d.perHourCents ? money(d.perHourCents) : '—' }),
 					el('td', { class: 'num', text: money(d.kitchen) }),
 					el('td', { class: 'num muted', text: d.leftover ? money(d.leftover) : '—' }),
 				]);
@@ -1153,14 +1251,14 @@
 			C.formatHours(s.totals.nightHours), C.centsToPlain(s.totals.serverNightTips)]);
 		lines.push([]);
 		lines.push([t('date'), t('colTotalTips'), t('colDayTips'), t('colNightTips'),
-			t('colServerPool', { pct: s.serverPct }), t('colKitchen', { pct: 100 - s.serverPct }), t('colLeftover'), t('colDayHours'), t('colNightHours')]);
+			t('colServerPool', { pct: s.serverPct }), t('colPerHour'), t('colKitchen', { pct: 100 - s.serverPct }), t('colLeftover'), t('colDayHours'), t('colNightHours')]);
 		s.days.forEach(function (d) {
 			lines.push([d.date, d.totalTips === null ? '' : C.centsToPlain(d.totalTips), C.centsToPlain(d.dayTips),
-				d.totalTips === null ? '' : C.centsToPlain(d.nightTips), C.centsToPlain(d.pool), C.centsToPlain(d.kitchen),
+				d.totalTips === null ? '' : C.centsToPlain(d.nightTips), C.centsToPlain(d.pool), C.centsToPlain(d.perHourCents), C.centsToPlain(d.kitchen),
 				C.centsToPlain(d.leftover), C.formatHours(d.dayHours), C.formatHours(d.nightHours)]);
 		});
 		lines.push([t('total'), C.centsToPlain(s.totals.tips), C.centsToPlain(s.totals.dayTips), C.centsToPlain(s.totals.nightTips),
-			C.centsToPlain(s.totals.pool), C.centsToPlain(s.totals.kitchen), C.centsToPlain(s.totals.leftover), C.formatHours(s.totals.dayHours), C.formatHours(s.totals.nightHours)]);
+			C.centsToPlain(s.totals.pool), C.centsToPlain(s.totals.perHourCents), C.centsToPlain(s.totals.kitchen), C.centsToPlain(s.totals.leftover), C.formatHours(s.totals.dayHours), C.formatHours(s.totals.nightHours)]);
 		const csv = '﻿' + lines.map(function (l) { return l.map(csvCell).join(','); }).join('\r\n');
 		download('tips_' + s.from + '_' + s.to + '.csv', csv, 'text/csv;charset=utf-8');
 	}
@@ -1302,7 +1400,8 @@
 
 		const list = S.servers.map(function (s) {
 			return el('li', { class: 'server-row' + (s.active ? '' : ' is-inactive'), 'data-server-id': s.id }, [
-				el('input', {
+				// Only the admin can change an existing name (staff can still add servers).
+				!isAdmin() ? el('span', { class: 'server-name', text: s.name }) : el('input', {
 					type: 'text',
 					maxlength: C.MAX_NAME_LENGTH,
 					value: s.name,
@@ -1375,13 +1474,6 @@
 					el('option', { value: 'en', selected: 'en' === lang }, 'English'),
 				]),
 			]),
-			el('ul', { class: 'facts' }, [
-				el('li', { text: t('factSplit', { pct: st.server_pct, kpct: 100 - st.server_pct }) }),
-				el('li', { text: t('factPeriods') }),
-				el('li', { text: t('factWindow') }),
-				el('li', { text: t('factRetention', { months: st.retention_months }) }),
-				el('li', { text: t('factTimezone', { tz: st.timezone }) }),
-			]),
 			el('button', {
 				type: 'button',
 				class: 'btn',
@@ -1433,7 +1525,79 @@
 
 		parts.push(passwordForm('staff', t('changePin'), t('changePinHelp'), 4));
 		parts.push(passwordForm('admin', t('changeAdminPw'), t('changeAdminPwHelp'), 8));
+		parts.push(errorLogCard());
 		return el('div', { class: 'stack' }, parts);
+	}
+
+	/** Admin: the errors phones ran into (newest first), with CSV download and Clear. */
+	function errorLogCard() {
+		const body = el('div', { class: 'error-log', text: t('loading') });
+		const seq = renderSeq;
+		function show(list) {
+			if (seq !== renderSeq) {
+				return; // the user moved on
+			}
+			if (!list.length) {
+				body.replaceChildren(el('p', { class: 'muted', text: t('errorLogEmpty') }));
+				return;
+			}
+			const shown = list.slice(0, 50);
+			body.replaceChildren(
+				el('p', { class: 'muted small', text: t('errorLogCount', { n: list.length, shown: shown.length }) }),
+				el('ul', { class: 'error-list' }, shown.map(function (x) {
+					const when = new Intl.DateTimeFormat(locale(), { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(x.at));
+					return el('li', null, el('details', null, [
+						el('summary', null, [
+							el('span', { class: 'muted', text: when + ' · ' + (x.role === 'admin' ? t('roleAdmin') : t('roleStaff')) + ' · ' }),
+							el('strong', { text: x.code }),
+							x.message ? el('span', { text: ' — ' + x.message }) : null,
+						]),
+						el('pre', { text: [x.context, x.page ? 'page: ' + x.page : '', x.ua].filter(Boolean).join('\n') }),
+					]));
+				})),
+				el('div', { class: 'row actions' }, [
+					el('button', {
+						type: 'button',
+						class: 'btn danger ghost',
+						onclick: async function (e) {
+							if (!window.confirm(t('confirmClearErrors'))) {
+								return;
+							}
+							await busy(e.currentTarget, async function () {
+								try {
+									await API.rpc('clear_error_log', { p_token: S.token });
+								} catch (err) {
+									handleError(err);
+									return;
+								}
+								toast(t('deleted'));
+								show([]);
+							});
+						},
+					}, t('clearErrors')),
+					el('button', {
+						type: 'button',
+						class: 'btn',
+						onclick: function () {
+							const lines = [['time', 'role', 'code', 'message', 'context', 'page', 'device']].concat(list.map(function (x) {
+								return [x.at, x.role, x.code, x.message || '', x.context || '', x.page || '', x.ua || ''];
+							}));
+							download('errors_' + S.today + '.csv', '\ufeff' + lines.map(function (l) { return l.map(csvCell).join(','); }).join('\r\n'), 'text/csv;charset=utf-8');
+						},
+					}, t('downloadCsv')),
+				]),
+			);
+		}
+		API.rpc('get_error_log', { p_token: S.token }).then(show, function (e) {
+			if (seq === renderSeq) {
+				body.replaceChildren(el('p', { class: 'notice error', text: errMessage(e) }));
+			}
+		});
+		return el('section', { class: 'card' }, [
+			el('h2', { text: t('errorLogTitle') }),
+			el('p', { class: 'muted small', text: t('errorLogHelp') }),
+			body,
+		]);
 	}
 
 	function passwordForm(kind, title, help, min) {

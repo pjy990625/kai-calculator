@@ -44,6 +44,26 @@ select test.ok((public.get_bootstrap(:'staff_token'))->>'role' = 'staff', 'PIN g
 select test.ok((public.get_bootstrap(:'admin_token'))->>'role' = 'admin', 'admin password gives admin role');
 select test.ok(test.err($$select public.get_bootstrap('nope')$$) = 'not_authenticated', 'bad token rejected');
 select test.ok((public.get_bootstrap(:'staff_token'))->'settings'->>'timezone' = 'America/Los_Angeles', 'LA time zone');
+select test.ok((public.get_bootstrap(:'staff_token'))->'settings'->>'retention_months' = '12', 'records kept for 1 year');
+select test.ok(((public.get_bootstrap(:'staff_token'))->>'retention_start')::date = (now() at time zone 'America/Los_Angeles')::date - interval '1 year', 'retention starts 1 year back');
+
+\echo '-- error log'
+select test.ok(test.err($$select public.log_errors('nope', '[{"code":"x"}]')$$) = 'not_authenticated', 'error log needs a session');
+select test.ok((public.log_errors(:'staff_token', '[{"code":"network","message":"Failed to fetch","context":"save_shifts","page":"entry","ua":"iPhone","at":"2026-10-10T20:00:00.000Z"}, 5, {"code":""}]'))->>'added' = '2', 'staff logs errors (non-objects skipped)');
+select test.ok((public.log_errors(:'staff_token', (select jsonb_agg(jsonb_build_object('code', 'js', 'message', repeat('x', 5000))) from generate_series(1, 50))))->>'added' = '20', 'at most 20 per call');
+select test.ok(char_length((public.get_error_log(:'admin_token'))->0->>'message') = 1000, 'long messages cut');
+select test.ok(test.err(format('select public.get_error_log(%L)', :'staff_token')) = 'admin_only', 'staff cannot read the error log');
+select test.ok(json_array_length(public.get_error_log(:'admin_token')) = 22, 'admin reads the error log');
+select test.ok((public.get_error_log(:'admin_token'))->21->>'code' = 'network', 'oldest last, fields kept');
+select test.ok((public.get_error_log(:'admin_token'))->20->>'code' = 'unknown', 'empty code becomes unknown');
+select test.ok(test.err(format('select public.clear_error_log(%L)', :'staff_token')) = 'admin_only', 'staff cannot clear');
+select test.ok((public.clear_error_log(:'admin_token'))->>'ok' = 'true', 'admin clears');
+select test.ok(json_array_length(public.get_error_log(:'admin_token')) = 0, 'error log empty after clearing');
+reset role;
+insert into private.error_log (role, code) select 'staff', 'flood' from generate_series(1, 195);
+set role anon;
+select test.ok((public.log_errors(:'staff_token', '[{"code":"a"},{"code":"b"},{"code":"c"},{"code":"d"},{"code":"e"},{"code":"f"},{"code":"g"}]'))->>'added' = '5', 'at most 200 per hour');
+select public.clear_error_log(:'admin_token');
 select test.ok((public.get_bootstrap(:'staff_token'))->'settings' ->> 'staff_hash' is null, 'hashes never returned');
 select (public.get_bootstrap(:'staff_token'))->>'today' as today \gset
 
@@ -52,7 +72,8 @@ select (public.add_server(:'staff_token', '  Alice  '))->>'id' as alice \gset
 select (public.add_server(:'staff_token', 'Bob'))->>'id' as bob \gset
 select test.ok(test.err(format('select public.add_server(%L, %L)', :'staff_token', 'ALICE')) = 'duplicate_name', 'duplicate name (case-insensitive)');
 select test.ok(test.err(format('select public.add_server(%L, %L)', :'staff_token', '   ')) = 'invalid_name', 'empty name');
-select test.ok((public.rename_server(:'staff_token', :'bob', 'Bobby'))->>'name' = 'Bobby', 'staff can rename');
+select test.ok(test.err(format('select public.rename_server(%L, %L, %L)', :'staff_token', :'bob', 'Bobby')) = 'admin_only', 'staff cannot rename');
+select test.ok((public.rename_server(:'admin_token', :'bob', 'Bobby'))->>'name' = 'Bobby', 'admin can rename');
 select test.ok(test.err(format('select public.set_server_active(%L, %L, false)', :'staff_token', :'bob')) = 'admin_only', 'staff cannot deactivate');
 select test.ok(test.err(format('select public.update_settings(%L, %L, 60, %L)', :'staff_token', 'X', '2026-09-28')) = 'admin_only', 'staff cannot change settings');
 select test.ok(test.err(format('select public.change_password(%L, %L, %L)', :'staff_token', 'staff', '1234')) = 'admin_only', 'staff cannot change passwords');
@@ -153,21 +174,21 @@ select (public.add_server(:'staff_token', 'Carol'))->>'id' as carol \gset
 select test.ok((public.delete_server(:'admin_token', :'carol'))->>'ok' = 'true', 'admin deletes unused server');
 select test.ok((public.set_server_active(:'admin_token', :'bob', false))->>'active' = 'false', 'admin deactivates');
 select test.ok((public.delete_server(:'admin_token', :'adam'))->>'ok' = 'true', 'admin deletes another unused server');
-select test.ok((public.rename_server(:'staff_token', :'alice', 'Zoe'))->>'name' = 'Zoe', 'rename');
+select test.ok((public.rename_server(:'admin_token', :'alice', 'Zoe'))->>'name' = 'Zoe', 'rename');
 select test.ok((public.get_bootstrap(:'staff_token'))->'servers'->0->>'name' = 'Bobby', 'a renamed server moves to its new place by name');
 select test.ok((public.update_settings(:'admin_token', 'Kai Sushi', 60, '2026-09-28'))->>'ok' = 'true', 'admin updates settings');
 select test.ok(test.err(format('select public.update_settings(%L, %L, 0, %L)', :'admin_token', 'X', '2026-09-28')) = 'invalid_settings', 'bad pct rejected');
 
-\echo '-- 3-month retention'
+\echo '-- 1-year retention'
 reset role;
 insert into private.days (date, day_tips_cents, created_by, updated_by)
-values ((private.today() - interval '3 months' - interval '1 day')::date, 100, 'admin', 'admin'),
-	((private.today() - interval '3 months' + interval '1 day')::date, 100, 'admin', 'admin');
+values ((private.today() - interval '1 year' - interval '1 day')::date, 100, 'admin', 'admin'),
+	((private.today() - interval '1 year' + interval '1 day')::date, 100, 'admin', 'admin');
 select private.purge();
-select test.ok((select count(*) = 0 from private.days where date < private.retention_start()), 'data older than 3 months deleted');
-select test.ok((select count(*) = 1 from private.days where date = (private.today() - interval '3 months' + interval '1 day')::date), 'recent data kept');
+select test.ok((select count(*) = 0 from private.days where date < private.retention_start()), 'data older than 1 year deleted');
+select test.ok((select count(*) = 1 from private.days where date = (private.today() - interval '1 year' + interval '1 day')::date), 'recent data kept');
 set role anon;
-select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 120, 1, %L::jsonb, null, null)', :'admin_token', :'today', '[]')) = 'too_old', 'cannot save older than retention');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 400, 1, %L::jsonb, null, null)', :'admin_token', :'today', '[]')) = 'too_old', 'cannot save older than retention');
 
 \echo '-- brute-force throttling'
 select set_config('request.headers', '{"x-forwarded-for":"10.9.9.9"}', false);

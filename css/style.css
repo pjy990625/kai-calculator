@@ -370,8 +370,6 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .notice[hidden], .row[hidden] { display: none; }
 input:disabled { opacity: .65; background: var(--surface-2); }
 .badge.admin { background: var(--night-soft); color: var(--night); }
-.facts { margin: 0 0 16px; padding-left: 18px; color: var(--muted); }
-.facts li { margin: 2px 0; }
 .card.form > .btn { margin-top: 4px; }
 
 /* Toasts */
@@ -441,3 +439,13 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.report-grid th, .report-grid td { padding-left: 4px; padding-right: 4px; }
 	.report-grid thead th { white-space: normal; }
 }
+
+/* Servers tab: staff see names as text (only the admin can rename). */
+.server-name { font-weight: 600; overflow-wrap: anywhere; padding: 10px 0; }
+.server-row.is-inactive .server-name { color: var(--muted); }
+
+/* Settings → Error log (admin) */
+.error-list { list-style: none; margin: 0 0 12px; padding: 0; }
+.error-list li { border-bottom: 1px solid var(--line); padding: 8px 0; font-size: .9rem; }
+.error-list summary { cursor: pointer; overflow-wrap: anywhere; min-height: 24px; }
+.error-list pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .78rem; color: var(--muted); margin: 6px 0 0; }

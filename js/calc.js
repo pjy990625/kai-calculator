@@ -366,8 +366,10 @@
 					pool: 0,
 					kitchen: 0,
 					leftover: 0,
+					paid: 0, // what servers actually received that day
 					dayHours: 0,
 					nightHours: 0,
+					perHourCents: 0,
 				};
 				if (d.totalTips === null || d.totalTips === undefined) {
 					warnings.push({ type: 'missingTotal', date: d.date });
@@ -394,6 +396,7 @@
 					detail.pool += r.pool;
 					detail.kitchen += r.kitchen;
 					detail.leftover += r.leftover;
+					detail.paid += r.paid;
 					totals[shift + 'Tips'] += r.tips;
 					totals.pool += r.pool;
 					totals.kitchen += r.kitchen;
@@ -403,6 +406,8 @@
 						warnings.push({ type: 'noHours', date: d.date, shift: shift, cents: r.unallocated });
 					}
 				});
+				const dayHours = detail.dayHours + detail.nightHours;
+				detail.perHourCents = dayHours > 0 ? Math.round(detail.paid * 100 / dayHours) : 0;
 				dayList.push(detail);
 			});
 
