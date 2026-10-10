@@ -75,27 +75,17 @@
 
 	const ERRLOG_KEY = 'kai-calculator:errors';
 	const ERRLOG_KEEP = 30;
-	// Normal answers from the database (wrong input, locked day, …), not problems.
-	const EXPECTED_ERRORS = [
-		'not_authenticated', 'admin_only', 'invalid_date', 'future_date', 'too_old', 'locked', 'date_locked',
-		'invalid_tips', 'invalid_hours', 'unknown_server', 'not_found', 'invalid_name', 'duplicate_name',
-		'server_has_hours', 'invalid_settings', 'invalid_password', 'password_conflict', 'invalid_range',
-	];
-	let errQueue = null;   // not sent yet (also kept in localStorage, so a reload or no signal loses nothing)
+	// Not sent yet (also kept in localStorage, so a reload or no signal loses nothing).
+	let errQueue = (function () {
+		try {
+			const saved = JSON.parse(lsGet(ERRLOG_KEY) || '[]');
+			return Array.isArray(saved) ? saved : [];
+		} catch (e) {
+			return [];
+		}
+	}());
 	let errTimer = null;
 	let errSending = false;
-
-	function errorQueue() {
-		if (!errQueue) {
-			try {
-				const saved = JSON.parse(lsGet(ERRLOG_KEY) || '[]');
-				errQueue = Array.isArray(saved) ? saved : [];
-			} catch (e) {
-				errQueue = [];
-			}
-		}
-		return errQueue;
-	}
 
 	function saveErrorQueue() {
 		if (errQueue.length) {
@@ -106,8 +96,7 @@
 	}
 
 	function logError(code, message, context) {
-		const q = errorQueue();
-		q.push({
+		errQueue.push({
 			id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
 			at: new Date().toISOString(),
 			code: String(code || 'unknown').slice(0, 40),
@@ -116,7 +105,7 @@
 			page: String(S.tab || ''),
 			ua: String(navigator.userAgent || '').slice(0, 300),
 		});
-		errQueue = q.slice(-ERRLOG_KEEP);
+		errQueue = errQueue.slice(-ERRLOG_KEEP);
 		saveErrorQueue();
 		clearTimeout(errTimer);
 		errTimer = setTimeout(flushErrors, 2000);
@@ -124,20 +113,20 @@
 
 	/** Send what is waiting. Quietly gives up (and tries later) when offline or logged out. */
 	async function flushErrors() {
-		if (errSending || !S.token || !errorQueue().length) {
+		if (errSending || !S.token || !errQueue.length) {
 			return;
 		}
-		const batch = errorQueue().slice(0, 20);
+		const batch = errQueue.slice(0, 20);
 		errSending = true;
 		try {
 			await API.rpc('log_errors', { p_token: S.token, p_entries: batch });
 		} catch (e) {
-			errSending = false;
 			return;
+		} finally {
+			errSending = false;
 		}
-		errSending = false;
 		const sent = batch.map(function (x) { return x.id; });
-		errQueue = errorQueue().filter(function (x) { return sent.indexOf(x.id) < 0; });
+		errQueue = errQueue.filter(function (x) { return sent.indexOf(x.id) < 0; });
 		saveErrorQueue();
 		if (errQueue.length) {
 			flushErrors();
@@ -145,8 +134,8 @@
 	}
 
 	API.onError = function (e, fn) {
-		if ('log_errors' === fn || (e && EXPECTED_ERRORS.indexOf(e.code) >= 0)) {
-			return;
+		if ('log_errors' === fn || (e && e.expected)) {
+			return; // normal answers (wrong input, locked day, …) are not problems
 		}
 		logError(e && e.code, e && (e.detail || e.message), 'rpc ' + fn);
 	};
@@ -207,14 +196,36 @@
 		return 'ko' === lang ? 'ko-KR' : 'en-US';
 	}
 
+	// Formatters are slow to build and money() runs on every keystroke: one per language.
+	const formatters = {};
+	function formatter(name, make) {
+		const key = name + ':' + lang;
+		return formatters[key] || (formatters[key] = make(locale()));
+	}
+
 	function money(cents) {
-		return new Intl.NumberFormat(locale(), {
-			style: 'currency',
-			currency: 'USD',
-			currencyDisplay: 'narrowSymbol',
-			minimumFractionDigits: 2,
-			maximumFractionDigits: 2,
+		return formatter('money', function (loc) {
+			return new Intl.NumberFormat(loc, {
+				style: 'currency',
+				currency: 'USD',
+				currencyDisplay: 'narrowSymbol',
+				minimumFractionDigits: 2,
+				maximumFractionDigits: 2,
+			});
 		}).format(cents / 100);
+	}
+
+	/** Local clock time ("9:41 PM"), with the date too when `withDate`. */
+	function niceTime(date, withDate) {
+		return formatter(withDate ? 'datetime' : 'time', function (loc) {
+			return new Intl.DateTimeFormat(loc, withDate
+				? { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }
+				: { hour: 'numeric', minute: '2-digit' });
+		}).format(date);
+	}
+
+	function roleLabel(role) {
+		return 'admin' === role ? t('roleAdmin') : t('roleStaff');
 	}
 
 	function niceDate(iso, withWeekday) {
@@ -236,7 +247,7 @@
 
 	function toast(msg, kind) {
 		const box = document.getElementById('toast');
-		const item = el('div', { class: 'toast ' + (kind || 'ok'), role: 'status', text: msg });
+		const item = el('div', { class: 'toast' + (kind ? ' ' + kind : ''), role: 'status', text: msg });
 		box.replaceChildren(item);
 		setTimeout(function () { item.remove(); }, kind === 'error' ? 6000 : 3000);
 	}
@@ -264,7 +275,7 @@
 	function errMessage(e) {
 		const code = e && e.code ? e.code : 'server';
 		const key = 'err_' + code;
-		const msg = t(key);
+		const msg = t(key, { months: S.settings ? S.settings.retention_months : 12 });
 		return msg === key ? t('err_server') : msg;
 	}
 
@@ -400,7 +411,7 @@
 		actions.replaceChildren();
 		if (S.role) {
 			appendChildren(actions, [
-				el('span', { class: 'badge ' + (isAdmin() ? 'admin' : 'on'), text: isAdmin() ? t('roleAdmin') : t('roleStaff') }),
+				el('span', { class: 'badge ' + (isAdmin() ? 'admin' : 'on'), text: roleLabel(S.role) }),
 				el('button', {
 					type: 'button',
 					class: 'icon-btn' + ('settings' === S.tab ? ' is-on' : ''),
@@ -588,7 +599,7 @@
 			return t('lockFuture');
 		}
 		if (S.retentionStart && date < S.retentionStart) {
-			return t('lockTooOld');
+			return t('lockTooOld', { months: S.settings.retention_months });
 		}
 		// Saved records: the database says. New records follow the same rule —
 		// staff only on that date itself (until 11:59 PM), the admin any time.
@@ -619,6 +630,13 @@
 
 		// Which tab has been typed in and not saved yet.
 		const dirty = { day: false, night: false };
+		function isDirty() {
+			return dirty.day || dirty.night;
+		}
+		function clearDirty() {
+			dirty.day = false;
+			dirty.night = false;
+		}
 		function onInput(shift) {
 			return function () {
 				dirty[shift] = true;
@@ -824,10 +842,10 @@
 			clearTimeout(timer);
 			timer = null;
 			if (inFlight) {
-				again = again || dirty.day || dirty.night;
+				again = again || isDirty();
 				return inFlight;
 			}
-			if (!dirty.day && !dirty.night) {
+			if (!isDirty()) {
 				return null;
 			}
 			const f = readForm();
@@ -838,8 +856,7 @@
 				setStatus('blocked', problem.msg);
 				return null;
 			}
-			dirty.day = false;
-			dirty.night = false;
+			clearDirty();
 			setStatus('saving');
 			inFlight = API.rpc('save_shifts', {
 				p_token: S.token,
@@ -850,7 +867,7 @@
 				p_night_hours: sent.night ? f.hours.night : null,
 			}, { keepalive: !!keepalive }).then(function () {
 				actionsRow.hidden = false; // the record exists now: it can be deleted
-				if (!dirty.day && !dirty.night) {
+				if (!isDirty()) {
 					setStatus('saved');
 				}
 			}, function (e) {
@@ -870,8 +887,7 @@
 		function onSaveError(e) {
 			if (e && ('locked' === e.code || 'date_locked' === e.code)) {
 				// Midnight passed (staff): the day is closed and can't be saved any more.
-				dirty.day = false;
-				dirty.night = false;
+				clearDirty();
 				again = false;
 				toast(t('err_locked'), 'error');
 				if (alive) {
@@ -891,22 +907,32 @@
 		}
 
 		/** One status line per tab, between the tips field and the table. */
-		const statusLines = { day: el('p', { class: 'save-status', role: 'status', 'aria-live': 'polite' }), night: el('p', { class: 'save-status', role: 'status', 'aria-live': 'polite' }) };
+		const statusLines = {};
+		C.SHIFTS.forEach(function (shift) {
+			statusLines[shift] = el('p', { class: 'save-status', role: 'status' });
+		});
+		let statusKind = '';
 		function setStatus(kind, msg) {
+			if ('saving' === kind && 'saving' === statusKind) {
+				return; // typing: already says "Saving…" (don't re-announce on every key)
+			}
+			statusKind = kind;
+			let text = '';
+			if ('saving' === kind) {
+				text = t('autoSaving');
+			} else if ('saved' === kind) {
+				text = t('autoSaved', { time: niceTime(new Date()) });
+			} else if ('blocked' === kind) {
+				text = t('autoBlocked', { reason: msg });
+			} else if ('failed' === kind) {
+				text = t('autoFailed', { reason: msg }) + ' ';
+			}
 			C.SHIFTS.forEach(function (shift) {
 				const line = statusLines[shift];
 				line.className = 'save-status ' + kind;
-				if ('saving' === kind) {
-					line.replaceChildren(t('autoSaving'));
-				} else if ('saved' === kind) {
-					line.replaceChildren(t('autoSaved', { time: new Intl.DateTimeFormat(locale(), { hour: 'numeric', minute: '2-digit' }).format(new Date()) }));
-				} else if ('blocked' === kind) {
-					line.replaceChildren(t('autoBlocked', { reason: msg }));
-				} else if ('failed' === kind) {
-					line.replaceChildren(t('autoFailed', { reason: msg }) + ' ', el('button', { type: 'button', class: 'btn small', onclick: function () { saveNow(); } }, t('retry')));
-				} else {
-					line.replaceChildren();
-				}
+				line.replaceChildren(text, 'failed' === kind
+					? el('button', { type: 'button', class: 'btn small', onclick: function () { saveNow(); } }, t('retry'))
+					: '');
 			});
 		}
 
@@ -917,7 +943,7 @@
 		 */
 		function leave() {
 			saveNow();
-			if (blocked && (dirty.day || dirty.night) && !window.confirm(t('leaveUnsaved', { reason: blocked.msg }))) {
+			if (blocked && isDirty() && !window.confirm(t('leaveUnsaved', { reason: blocked.msg }))) {
 				dateInput.value = date;
 				return false;
 			}
@@ -967,15 +993,13 @@
 				handleError(e);
 				return;
 			}
-			dirty.day = false;
-			dirty.night = false;
-			blocked = null;
+			clearDirty();
 			toast(t('deleted'));
 			render();
 		}
 
 		let dateInput = null;
-		// No Save button: changes save themselves (status line in each tab).
+		// Changes save themselves, so the only action is Delete (once there is a record).
 		const actionsRow = el('div', { class: 'row actions', hidden: !rec }, [
 			el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')),
 		]);
@@ -1058,11 +1082,11 @@
 			flush: saveNow,
 			leave: leave,
 			date: date,
-			unsaved: function () { return dirty.day || dirty.night; }, // typed but not sendable
+			unsaved: isDirty, // typed but not sendable
 		};
 		// Opening a date picks its tab: nothing saved → Day tips; day AND night
 		// saved → Night tips; only the day saved → the tab that was open. Redraws
-		// of the same date (e.g. after Save) keep the tab the user is on.
+		// of the same date (e.g. coming back from another tab) keep the tab the user is on.
 		if (S.entryShiftDate !== date) {
 			S.entryShiftDate = date;
 			if (!rec) {
@@ -1085,7 +1109,7 @@
 		return 'month' === kind ? C.monthRange(C.monthKey(date)) : C.payPeriodFor(date);
 	}
 
-	/** "2주 / 월" switch + ‹ range › navigation, shared by Reports and My hours. */
+	/** Bi-weekly / Monthly switch + ‹ range › navigation, shared by Reports and My hours. */
 	function rangeControls(kind, r, onKind, onDate) {
 		const isMonth = 'month' === kind;
 		function move(n) {
@@ -1161,7 +1185,7 @@
 	}
 
 	function statCard(label, value, kind) {
-		return el('div', { class: 'stat ' + kind }, [
+		return el('div', { class: 'stat' + (kind ? ' ' + kind : '') }, [
 			el('span', { class: 'stat-label', text: label }),
 			el('span', { class: 'stat-value', text: value }),
 		]);
@@ -1238,6 +1262,11 @@
 		return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 	}
 
+	/** Rows → a CSV file Excel opens correctly (BOM for Korean text, CRLF lines). */
+	function downloadCsvFile(filename, lines) {
+		download(filename, '\ufeff' + lines.map(function (l) { return l.map(csvCell).join(','); }).join('\r\n'), 'text/csv;charset=utf-8');
+	}
+
 	function downloadCsv(s) {
 		const lines = [];
 		lines.push([s.from + ' ~ ' + s.to]);
@@ -1259,8 +1288,7 @@
 		});
 		lines.push([t('total'), C.centsToPlain(s.totals.tips), C.centsToPlain(s.totals.dayTips), C.centsToPlain(s.totals.nightTips),
 			C.centsToPlain(s.totals.pool), C.centsToPlain(s.totals.perHourCents), C.centsToPlain(s.totals.kitchen), C.centsToPlain(s.totals.leftover), C.formatHours(s.totals.dayHours), C.formatHours(s.totals.nightHours)]);
-		const csv = '﻿' + lines.map(function (l) { return l.map(csvCell).join(','); }).join('\r\n');
-		download('tips_' + s.from + '_' + s.to + '.csv', csv, 'text/csv;charset=utf-8');
+		downloadCsvFile('tips_' + s.from + '_' + s.to + '.csv', lines);
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -1545,10 +1573,10 @@
 			body.replaceChildren(
 				el('p', { class: 'muted small', text: t('errorLogCount', { n: list.length, shown: shown.length }) }),
 				el('ul', { class: 'error-list' }, shown.map(function (x) {
-					const when = new Intl.DateTimeFormat(locale(), { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(x.at));
+					const when = niceTime(new Date(x.at), true);
 					return el('li', null, el('details', null, [
 						el('summary', null, [
-							el('span', { class: 'muted', text: when + ' · ' + (x.role === 'admin' ? t('roleAdmin') : t('roleStaff')) + ' · ' }),
+							el('span', { class: 'muted', text: when + ' · ' + roleLabel(x.role) + ' · ' }),
 							el('strong', { text: x.code }),
 							x.message ? el('span', { text: ' — ' + x.message }) : null,
 						]),
@@ -1582,7 +1610,7 @@
 							const lines = [['time', 'role', 'code', 'message', 'context', 'page', 'device']].concat(list.map(function (x) {
 								return [x.at, x.role, x.code, x.message || '', x.context || '', x.page || '', x.ua || ''];
 							}));
-							download('errors_' + S.today + '.csv', '\ufeff' + lines.map(function (l) { return l.map(csvCell).join(','); }).join('\r\n'), 'text/csv;charset=utf-8');
+							downloadCsvFile('errors_' + S.today + '.csv', lines);
 						},
 					}, t('downloadCsv')),
 				]),

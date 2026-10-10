@@ -11,7 +11,6 @@
 	--accent-ink: #ffffff;
 	--accent-soft: #e0f2ef;
 	--day: #b45309;
-	--day-soft: #fef3c7;
 	--night: #4338ca;
 	--night-soft: #e0e7ff;
 	--danger: #b91c1c;
@@ -36,7 +35,6 @@
 		--accent-ink: #0b1f1d;
 		--accent-soft: #123532;
 		--day: #fbbf24;
-		--day-soft: #3a2c0c;
 		--night: #a5b4fc;
 		--night-soft: #23264a;
 		--danger: #f87171;
@@ -48,14 +46,17 @@
 }
 
 * { box-sizing: border-box; }
+/* `hidden` always wins, even on elements whose class sets display (e.g. .row is flex). */
+[hidden] { display: none !important; }
 
 html {
 	-webkit-text-size-adjust: 100%;
-	/* A field focused near the top (keyboard opening) is not hidden under the sticky header. */
-	scroll-padding-top: 120px;
+	/* A field focused near the top (keyboard opening) is not hidden under the sticky header
+	   (about 110px tall, plus the notch area in a home-screen app). */
+	scroll-padding-top: calc(120px + env(safe-area-inset-top));
 }
 /* No 300 ms double-tap-zoom wait on taps; no grey flash on iPhone. */
-button, input, select, summary, .tab { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+button, input, select, summary { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 
 body {
 	margin: 0;
@@ -64,16 +65,14 @@ body {
 	font: 15px/1.5 var(--font);
 }
 
-h1, h2, h3, h4 { margin: 0; line-height: 1.25; }
+h1, h2, h3 { margin: 0; line-height: 1.25; }
 h2 { font-size: 1.15rem; }
 h3 { font-size: 1rem; }
-h4 { font-size: .95rem; }
 p { margin: .25rem 0 .75rem; }
 
 .muted { color: var(--muted); }
 .small { font-size: .85rem; }
 .strong { font-weight: 700; }
-.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
 /* Layout */
 
@@ -129,8 +128,6 @@ p { margin: .25rem 0 .75rem; }
 main { padding-top: 16px; padding-bottom: calc(48px + env(safe-area-inset-bottom)); }
 .stack { display: grid; gap: 16px; }
 .row { display: flex; gap: 8px; align-items: center; }
-.row.wrap { flex-wrap: wrap; align-items: flex-end; }
-.row.between { justify-content: space-between; flex-wrap: wrap; }
 .row.tight { gap: 4px; flex-wrap: wrap; }
 .row.actions { margin-top: 12px; justify-content: flex-end; }
 
@@ -148,9 +145,7 @@ main { padding-top: 16px; padding-bottom: calc(48px + env(safe-area-inset-bottom
 /* Forms */
 
 .field { display: grid; gap: 4px; margin: 0 0 12px; min-width: 0; }
-.field > span, .field legend { font-size: .85rem; font-weight: 600; color: var(--muted); }
-.field.grow { flex: 1 1 200px; }
-fieldset.field { border: 0; padding: 0; }
+.field > span { font-size: .85rem; font-weight: 600; color: var(--muted); }
 
 input[type="text"], input[type="date"], input[type="number"], input[type="password"], select {
 	font: inherit;
@@ -168,11 +163,7 @@ input:focus-visible, select:focus-visible, button:focus-visible {
 	outline-offset: 1px;
 }
 input.invalid { border-color: var(--danger); background: var(--danger-soft); }
-#tips { font-size: 1.15rem; font-weight: 700; }
 
-.radio { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; cursor: pointer; }
-.radio input { margin-top: 4px; accent-color: var(--accent); }
-.radio span { display: grid; }
 
 .btn {
 	font: inherit; font-weight: 600;
@@ -210,8 +201,6 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 }
 .segmented button.is-on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
 
-.status { font-size: .85rem; font-weight: 600; color: var(--muted); }
-.status.editing { color: var(--accent); }
 
 /* Tables */
 
@@ -251,13 +240,10 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	border-radius: 999px;
 	background: var(--surface-2); color: var(--muted);
 }
-.badge.day { background: var(--day-soft); color: var(--day); }
-.badge.night { background: var(--night-soft); color: var(--night); }
 .badge.on { background: var(--accent-soft); color: var(--accent); }
 
 /* Reports */
 
-.controls { display: grid; gap: 12px; justify-items: start; }
 .row.nav strong { min-width: 12ch; text-align: center; }
 .report-head { margin-bottom: 12px; }
 .eyebrow { margin: 0; font-size: .8rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); }
@@ -266,10 +252,10 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
 .stat { background: var(--surface-2); border-radius: var(--radius-sm); padding: 10px 12px; display: grid; gap: 2px; min-width: 0; }
 .stat-label { font-size: .78rem; color: var(--muted); font-weight: 600; }
-.stat-value { font-size: 1.15rem; font-weight: 800; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.stat-value { font-size: 1.15rem; font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .stat.accent { background: var(--accent-soft); }
 .cards.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.btn.link, button.link {
+button.link {
 	font: inherit; font-weight: 600;
 	color: var(--accent);
 	background: none; border: 0;
@@ -277,9 +263,9 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	text-decoration: underline; text-underline-offset: 3px;
 	cursor: pointer;
 }
-/* My hours: one card. Name + dropdown on one line, then period controls. */
 /* Tablets: one-column screens stay a comfortable width, centered (reports use the full width for their tables). */
 .narrow { max-width: 720px; margin-left: auto; margin-right: auto; width: 100%; }
+/* My hours: name + dropdown on one line, then period controls. */
 .field.inline { display: flex; align-items: center; gap: 12px; }
 .field.inline > span { flex: none; font-size: .95rem; color: var(--text); }
 .field.inline > select { flex: 1 1 auto; min-width: 0; }
@@ -288,20 +274,15 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	gap: 8px 12px; margin: 4px 0 16px;
 }
 .range-bar .row.nav { flex: 1 1 auto; justify-content: flex-end; }
-.stat-value { white-space: nowrap; overflow-wrap: normal; }
 /* Narrow phones: My tips gets a full row on top, hours and per-hour share the next. */
 @media (max-width: 420px) {
 	.card.mine .cards.three { grid-template-columns: 1fr 1fr; }
 	.card.mine .cards.three .stat:nth-child(2) { grid-column: 1 / -1; order: -1; }
 }
 .stat.accent .stat-value { color: var(--accent); }
-.stat.day .stat-value { color: var(--day); }
-.stat.night .stat-value { color: var(--night); }
 
 .section-title { margin: 24px 0 8px; }
 .print-only { display: none; }
-.sub-report { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
-.generated { margin: 16px 0 0; }
 
 .notice { border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 12px; font-weight: 600; font-size: .9rem; }
 .notice.warn { background: var(--warn-soft); border: 1px solid var(--warn-line); }
@@ -359,7 +340,6 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .shift-tab.is-on { background: var(--surface); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
 .shift-tab.day.is-on { color: var(--day); }
 .shift-tab.night.is-on { color: var(--night); }
-.shift-panel[hidden] { display: none; }
 .tips-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: end; max-width: 560px; }
 .tips-grid input { font-size: 1.15rem; font-weight: 700; }
 .computed {
@@ -380,7 +360,6 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .notice.info { font-weight: 500; }
 .entry-grid small { font-weight: 400; font-size: .75rem; }
 .entry-grid small .part { white-space: nowrap; }
-.notice[hidden], .row[hidden] { display: none; }
 input:disabled { opacity: .65; background: var(--surface-2); }
 .badge.admin { background: var(--night-soft); color: var(--night); }
 .card.form > .btn { margin-top: 4px; }
@@ -410,7 +389,6 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.tabs { gap: 0; }
 	.tab { padding: 10px 9px; }
 	.cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-	.cards.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 	.cards.three .stat-value { font-size: 1rem; }
 	.server-row { grid-template-columns: minmax(0, 1fr) auto; }
 	.server-row .row.tight { grid-column: 1 / -1; }
@@ -443,7 +421,6 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.card { border: 0; box-shadow: none; padding: 0; }
 	.table-wrap { overflow: visible; }
 	main { padding: 0; }
-	.sub-report { break-inside: avoid; }
 }
 
 /* Touch screens: every button at least 40px for fingers (after the base rules it overrides). */

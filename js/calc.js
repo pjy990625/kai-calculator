@@ -69,10 +69,6 @@
 		return fromUtcMs(toUtcMs(iso) + n * DAY_MS);
 	}
 
-	function diffDays(a, b) {
-		return Math.round((toUtcMs(b) - toUtcMs(a)) / DAY_MS);
-	}
-
 	/**
 	 * The pay period containing `iso`. Pay periods are always the 1st–15th
 	 * and the 16th–last day of each month.
@@ -441,7 +437,6 @@
 		isIsoDate: isIsoDate,
 		toUtcMs: toUtcMs,
 		addDays: addDays,
-		diffDays: diffDays,
 		payPeriodFor: payPeriodFor,
 		shiftPayPeriod: shiftPayPeriod,
 		monthKey: monthKey,
@@ -452,7 +447,6 @@
 		formatHours: formatHours,
 		centsToPlain: centsToPlain,
 		cleanName: cleanName,
-		compareNames: compareNames,
 		sortServers: sortServers,
 		sumWeights: sumWeights,
 		splitWholeDollars: splitWholeDollars,

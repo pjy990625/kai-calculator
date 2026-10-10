@@ -41,10 +41,11 @@ create table if not exists private.config (
 	admin_hash        text
 );
 insert into private.config (id) values (1) on conflict (id) do nothing;
--- Older versions kept records for 3 months. Keep them for 1 year now.
--- (Records already deleted before this change cannot come back.)
+-- Older versions kept records for 3 months (the old default). Keep them for
+-- 1 year now. Only the old default is changed, so re-running this file never
+-- undoes a value set on purpose. Records already deleted cannot come back.
 alter table private.config alter column retention_months set default 12;
-update private.config set retention_months = 12 where id = 1 and retention_months < 12;
+update private.config set retention_months = 12 where id = 1 and retention_months = 3;
 -- Older versions let staff edit for N hours after the first save. Staff can
 -- now edit until the end of the record's own date, so the setting is gone.
 alter table private.config drop column if exists edit_window_hours;
@@ -100,6 +101,8 @@ create table if not exists private.audit_log (
 	action text not null,
 	detail jsonb
 );
+-- private.purge() runs on every save and deletes old rows by `at`.
+create index if not exists audit_log_at on private.audit_log (at);
 
 -- Errors the app ran into (failed saves, lost connection, app bugs), so the
 -- admin can see what went wrong on someone's phone. Kept for 90 days.

@@ -22,6 +22,8 @@
 			super(code);
 			this.code = code;
 			this.detail = detail || '';
+			// A normal answer from the database (wrong input, locked day, …), not a problem.
+			this.expected = KNOWN.indexOf(code) >= 0;
 		}
 	}
 
