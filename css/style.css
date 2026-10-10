@@ -49,7 +49,13 @@
 
 * { box-sizing: border-box; }
 
-html { -webkit-text-size-adjust: 100%; }
+html {
+	-webkit-text-size-adjust: 100%;
+	/* A field focused near the top (keyboard opening) is not hidden under the sticky header. */
+	scroll-padding-top: 120px;
+}
+/* No 300 ms double-tap-zoom wait on taps; no grey flash on iPhone. */
+button, input, select, summary, .tab { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 
 body {
 	margin: 0;
@@ -77,11 +83,13 @@ p { margin: .25rem 0 .75rem; }
 	position: sticky;
 	top: 0;
 	z-index: 5;
+	padding-top: env(safe-area-inset-top); /* home-screen app on a notched iPhone */
 }
 .topbar-inner, main {
 	max-width: 980px;
 	margin: 0 auto;
-	padding: 0 16px;
+	/* Landscape iPhone: keep clear of the notch / rounded corners. */
+	padding: 0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
 }
 .topbar-inner { padding-top: 12px; }
 .brand { display: flex; gap: 12px; align-items: center; }
@@ -94,7 +102,10 @@ p { margin: .25rem 0 .75rem; }
 	background: none; color: var(--muted);
 	cursor: pointer;
 }
-.icon-btn:hover { background: var(--surface-2); color: var(--text); }
+.icon-btn:active { background: var(--surface-2); color: var(--text); }
+@media (hover: hover) {
+	.icon-btn:hover { background: var(--surface-2); color: var(--text); }
+}
 .icon-btn.is-on { color: var(--accent); background: var(--accent-soft); }
 .logo {
 	width: 36px; height: 36px; flex: none;
@@ -115,7 +126,7 @@ p { margin: .25rem 0 .75rem; }
 }
 .tab.is-on { color: var(--text); border-bottom-color: var(--accent); }
 
-main { padding-top: 16px; padding-bottom: 48px; }
+main { padding-top: 16px; padding-bottom: calc(48px + env(safe-area-inset-bottom)); }
 .stack { display: grid; gap: 16px; }
 .row { display: flex; gap: 8px; align-items: center; }
 .row.wrap { flex-wrap: wrap; align-items: flex-end; }
@@ -174,6 +185,7 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 	white-space: nowrap; /* "오늘" must not break into "오 / 늘" */
 	cursor: pointer;
 }
+.btn:active:not(:disabled), .segmented button:active, .tab:active { opacity: .7; } /* tap feedback */
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.ghost { background: transparent; }
@@ -266,7 +278,8 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	cursor: pointer;
 }
 /* My hours: one card. Name + dropdown on one line, then period controls. */
-.card.mine { max-width: 720px; margin: 0 auto; width: 100%; }
+/* Tablets: one-column screens stay a comfortable width, centered (reports use the full width for their tables). */
+.narrow { max-width: 720px; margin-left: auto; margin-right: auto; width: 100%; }
 .field.inline { display: flex; align-items: center; gap: 12px; }
 .field.inline > span { flex: none; font-size: .95rem; color: var(--text); }
 .field.inline > select { flex: 1 1 auto; min-width: 0; }
@@ -375,7 +388,7 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 /* Toasts */
 
 .toast-box {
-	position: fixed; left: 50%; bottom: 16px;
+	position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); /* above the iPhone home bar */
 	transform: translateX(-50%);
 	display: grid; gap: 8px;
 	width: min(420px, calc(100% - 32px));
@@ -407,6 +420,16 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.entry-grid small .part { display: block; }
 	.entry-grid small .sep { display: none; }
 	.report-head h2 { font-size: 1.2rem; }
+}
+
+/* Phone held sideways: little height, so the header scrolls away instead of staying on top. */
+@media (orientation: landscape) and (max-height: 500px) {
+	.topbar { position: static; }
+	html { scroll-padding-top: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.server-row.is-new { animation: none; background: var(--accent-soft); }
 }
 
 /* Print / PDF */

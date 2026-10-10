@@ -1021,7 +1021,7 @@
 			}, 'day' === k ? '☀ ' + t('dayTips') : '☾ ' + t('nightTips'));
 		});
 
-		const form = el('form', { class: 'card', onsubmit: onSubmit, novalidate: true }, [
+		const form = el('form', { class: 'card narrow', onsubmit: onSubmit, novalidate: true }, [
 			el('div', { class: 'row date-nav' }, [
 				// ‹ date › always stay on one line; Today may drop below on narrow screens.
 				el('div', { class: 'date-step' }, [
@@ -1287,7 +1287,7 @@
 		]);
 
 		if (!id) {
-			setMain(el('section', { class: 'card mine' }, [
+			setMain(el('section', { class: 'card mine narrow' }, [
 				S.servers.length ? picker : null,
 				el('p', { class: 'muted', text: S.servers.length ? t('pickYourNameHelp') : t('noServersYet') }),
 			]));
@@ -1308,7 +1308,7 @@
 			const pending = list.some(function (d) { return missing[d.date] && d.nightHours > 0; });
 
 			// One card: name, period, totals, then the day-by-day table.
-			return el('section', { class: 'card mine' }, [
+			return el('section', { class: 'card mine narrow' }, [
 				picker,
 				el('div', { class: 'range-bar' }, rangeControls(S.mineKind, r,
 					function (v) { S.mineKind = v; render(); },
@@ -1442,7 +1442,7 @@
 			]);
 		});
 
-		return el('section', { class: 'card' }, [
+		return el('section', { class: 'card narrow' }, [
 			el('h2', { text: t('staffTitle') }),
 			el('p', { class: 'muted', text: isAdmin() ? t('staffHelpAdmin') : t('staffHelp') }),
 			el('form', { class: 'row add-server', onsubmit: onAdd }, [nameInput, addBtn]),
@@ -1488,7 +1488,7 @@
 		]));
 
 		if (!isAdmin()) {
-			return el('div', { class: 'stack' }, parts);
+			return el('div', { class: 'stack narrow' }, parts);
 		}
 
 		const nameIn = el('input', { type: 'text', maxlength: 60, value: st.restaurant_name });
@@ -1526,7 +1526,7 @@
 		parts.push(passwordForm('staff', t('changePin'), t('changePinHelp'), 4));
 		parts.push(passwordForm('admin', t('changeAdminPw'), t('changeAdminPwHelp'), 8));
 		parts.push(errorLogCard());
-		return el('div', { class: 'stack' }, parts);
+		return el('div', { class: 'stack narrow' }, parts);
 	}
 
 	/** Admin: the errors phones ran into (newest first), with CSV download and Clear. */
