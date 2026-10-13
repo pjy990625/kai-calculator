@@ -1481,7 +1481,7 @@
 
 			// One card: back, name, period, totals, then the day-by-day table.
 			return el('section', { class: 'card person narrow' }, [
-				el('div', { class: 'row' }, el('button', { type: 'button', class: 'btn ghost', onclick: backToReports }, t('backToReports'))),
+				el('div', { class: 'row back-row' }, el('button', { type: 'button', class: 'btn ghost', onclick: backToReports }, t('backToReports'))),
 				picker,
 				el('div', { class: 'range-bar' }, rangeControls(S.personKind, r,
 					function (v) { S.personKind = v; render(); },
