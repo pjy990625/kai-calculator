@@ -1207,9 +1207,6 @@
 		if (S.retentionStart && s.from < S.retentionStart) {
 			parts.push(el('div', { class: 'notice warn', text: t('retentionNote', { months: S.settings.retention_months, date: niceDate(S.retentionStart) }) }));
 		}
-		if (tot.leftover > 0) {
-			parts.push(el('div', { class: 'notice info', text: t('leftoverNote', { amount: money(tot.leftover) }) }));
-		}
 		s.warnings.forEach(function (w) {
 			parts.push(el('div', {
 				class: 'notice warn',
