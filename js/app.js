@@ -28,10 +28,8 @@
 		entryDate: null,
 		entryShift: 'day', // which tab of the daily entry card is open: 'day' | 'night'
 		entryShiftDate: null, // the date entryShift was chosen for
-		reportKind: 'period',
+		reportKind: 'period', // 'day' | 'period' | 'month'
 		reportDate: null,
-		reportOpen: {}, // Reports → Per day: dates whose "who worked" row is open
-		reportOpenRange: null, // the range reportOpen belongs to (closed again when the range changes)
 		mineId: null,
 		mineKind: 'period',
 		mineDate: null,
@@ -1047,26 +1045,10 @@
 			}, 'day' === k ? '☀ ' + t('dayTips') : '☾ ' + t('nightTips'));
 		});
 
+		const picker = dayPicker(date, function (d) { S.entryDate = d; render(); });
+		dateInput = picker.input;
 		const form = el('form', { class: 'card narrow', onsubmit: onSubmit, novalidate: true }, [
-			el('div', { class: 'row date-nav' }, [
-				// ‹ date › always stay on one line; Today may drop below on narrow screens.
-				el('div', { class: 'date-step' }, [
-					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('prevDay'), onclick: function () { S.entryDate = C.addDays(date, -1); render(); } }, '‹'),
-					dateInput = el('input', {
-						type: 'date', class: 'date-input', value: date, max: S.today, required: true, 'aria-label': t('date'),
-						onchange: function (e) {
-							if (C.isIsoDate(e.target.value)) {
-								S.entryDate = e.target.value;
-								render();
-							} else {
-								e.target.value = date; // iOS "Clear" leaves it empty
-							}
-						},
-					}),
-					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('nextDay'), disabled: date >= S.today, onclick: function () { S.entryDate = C.addDays(date, 1); render(); } }, '›'),
-				]),
-				date !== S.today ? el('button', { type: 'button', class: 'btn small', onclick: function () { S.entryDate = S.today; render(); } }, t('today')) : null,
-			]),
+			picker.node,
 			status,
 			el('div', { class: 'shift-tabs', role: 'tablist', 'aria-label': t('entryTitle') }, [tabButtons.day, tabButtons.night]),
 			panels.day,
@@ -1102,23 +1084,66 @@
 		return form;
 	}
 
+	/**
+	 * ‹ calendar › for one day plus a Today button, shared by Daily entry and
+	 * Reports → Daily. Future dates cannot be picked.
+	 */
+	function dayPicker(date, onPick) {
+		const input = el('input', {
+			type: 'date', class: 'date-input', value: date, max: S.today, required: true, 'aria-label': t('date'),
+			onchange: function (e) {
+				const v = e.target.value;
+				if (C.isIsoDate(v) && v <= S.today) {
+					onPick(v);
+				} else {
+					e.target.value = date; // iOS "Clear" leaves it empty
+				}
+			},
+		});
+		return {
+			input: input,
+			node: el('div', { class: 'row date-nav' }, [
+				// ‹ date › always stay on one line; Today may drop below on narrow screens.
+				el('div', { class: 'date-step' }, [
+					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('prevDay'), onclick: function () { onPick(C.addDays(date, -1)); } }, '‹'),
+					input,
+					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('nextDay'), disabled: date >= S.today, onclick: function () { onPick(C.addDays(date, 1)); } }, '›'),
+				]),
+				date !== S.today ? el('button', { type: 'button', class: 'btn small', onclick: function () { onPick(S.today); } }, t('today')) : null,
+			]),
+		};
+	}
+
 	/* ------------------------------------------------------------------ */
 	/* Report tab                                                          */
 	/* ------------------------------------------------------------------ */
 
-	/** Pay period (1st–15th / 16th–end) or calendar month containing `date`. */
+	/** The day, pay period (1st–15th / 16th–end) or calendar month containing `date`. */
 	function rangeFor(kind, date) {
+		if ('day' === kind) {
+			return { from: date, to: date };
+		}
 		return 'month' === kind ? C.monthRange(C.monthKey(date)) : C.payPeriodFor(date);
 	}
 
-	/** Bi-weekly / Monthly switch + ‹ range › navigation, shared by Reports and My hours. */
-	function rangeControls(kind, r, onKind, onDate) {
+	/**
+	 * Period switch + ‹ range › navigation, shared by Reports and My hours.
+	 * `withDay`: also offer Daily (Reports only), picked from a calendar.
+	 */
+	function rangeControls(kind, r, onKind, onDate, withDay) {
+		const kinds = [{ value: 'period', label: t('reportPeriod') }, { value: 'month', label: t('reportMonth') }];
+		if (withDay) {
+			kinds.unshift({ value: 'day', label: t('reportDay') });
+		}
+		if ('day' === kind) {
+			return [segmented(kinds, kind, onKind), dayPicker(r.from, onDate).node];
+		}
 		const isMonth = 'month' === kind;
 		function move(n) {
 			onDate(isMonth ? C.shiftMonth(C.monthKey(r.from), n) + '-01' : C.shiftPayPeriod(r.from, n).from);
 		}
 		return [
-			segmented([{ value: 'period', label: t('reportPeriod') }, { value: 'month', label: t('reportMonth') }], kind, onKind),
+			segmented(kinds, kind, onKind),
 			el('div', { class: 'row nav' }, [
 				el('button', { type: 'button', class: 'btn ghost', 'aria-label': t('prev'), onclick: function () { move(-1); } }, '‹'),
 				el('strong', { text: isMonth ? monthLabel(C.monthKey(r.from)) : rangeLabel(r.from, r.to) }),
@@ -1129,25 +1154,47 @@
 
 	function renderReportTab(seq) {
 		const r = rangeFor(S.reportKind, S.reportDate);
-		const isMonth = 'month' === S.reportKind;
 		loadRange(seq, r.from, r.to, function (range) {
-			return renderReportBody(C.summarize(calcInput(range), r.from, r.to), r, isMonth);
+			return renderReportBody(C.summarize(calcInput(range), r.from, r.to), r);
 		});
 	}
 
-	/** One card: period controls, totals, notices, per-person and per-day tables, CSV / print. */
-	function renderReportBody(s, r, isMonth) {
+	/** Reports → Daily for `date`. */
+	function openDay(date) {
+		S.reportKind = 'day';
+		S.reportDate = date;
+		render();
+		window.scrollTo(0, 0);
+	}
+
+	/** One card: period controls, totals, notices, the tables, CSV / print. */
+	function renderReportBody(s, r) {
 		const tot = s.totals;
+		const kind = S.reportKind;
+		let title = rangeLabel(s.from, s.to);
+		if ('month' === kind) {
+			title = monthLabel(s.from.slice(0, 7));
+		} else if ('day' === kind) {
+			title = niceDate(s.from, true) + ', ' + s.from.slice(0, 4);
+		}
 		const parts = [
 			// The on-screen period controls are not printed, so print gets its own heading.
 			el('header', { class: 'report-head print-only' }, [
 				S.settings.restaurant_name ? el('p', { class: 'eyebrow', text: S.settings.restaurant_name }) : null,
-				el('h2', { text: isMonth ? monthLabel(s.from.slice(0, 7)) : rangeLabel(s.from, s.to) }),
-				isMonth ? el('p', { class: 'muted', text: rangeLabel(s.from, s.to) }) : null,
+				el('h2', { text: title }),
+				'month' === kind ? el('p', { class: 'muted', text: rangeLabel(s.from, s.to) }) : null,
 			]),
-			el('div', { class: 'range-bar no-print' }, rangeControls(S.reportKind, r,
-				function (v) { S.reportKind = v; render(); },
-				function (d) { S.reportDate = d; render(); }
+			el('div', { class: 'range-bar no-print' }, rangeControls(kind, r,
+				function (v) {
+					// Daily opens on today; the other views keep the date being looked at.
+					if ('day' === v && 'day' !== kind) {
+						S.reportDate = S.today;
+					}
+					S.reportKind = v;
+					render();
+				},
+				function (d) { S.reportDate = d; render(); },
+				true
 			)),
 			el('div', { class: 'cards' }, [
 				statCard(t('cardTotalTips'), money(tot.tips), ''),
@@ -1172,13 +1219,29 @@
 			}));
 		});
 
-		parts.push(el('h3', { class: 'section-title', text: t('perPersonTitle') }));
-		parts.push(s.rows.length ? personTable(s.rows, tot) : el('p', { class: 'muted', text: t('noData') }));
-
-		if (s.days.length) {
-			parts.push(dayTable(s));
+		if ('day' === kind) {
+			parts.push(el('h3', { class: 'section-title', text: t('perPersonTitle') }));
+			parts.push(dailyTable(s));
+		} else {
+			parts.push(el('h3', { class: 'section-title', text: t('perPersonTitle') }));
+			parts.push(s.rows.length ? personTable(s.rows, tot) : el('p', { class: 'muted', text: t('noData') }));
+			if (s.days.length) {
+				parts.push(el('h3', { class: 'section-title', text: t('perDayTitle') }));
+				parts.push(el('p', { class: 'muted small no-print', text: t('perDayHelp') }));
+				parts.push(dayTable(s));
+			}
 		}
 		parts.push(el('div', { class: 'row actions no-print' }, [
+			'day' === kind ? el('button', {
+				type: 'button',
+				class: 'btn',
+				onclick: function () {
+					S.tab = 'entry';
+					S.entryDate = s.from;
+					render();
+					window.scrollTo(0, 0);
+				},
+			}, t('openInEntry')) : null,
 			el('button', { type: 'button', class: 'btn', onclick: function () { downloadCsv(s); } }, t('downloadCsv')),
 			el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
 		]));
@@ -1224,126 +1287,77 @@
 	/** Reports → My hours of one server, for the same range. */
 	function openPerson(id) {
 		S.mineId = id;
-		S.mineKind = S.reportKind;
+		S.mineKind = 'day' === S.reportKind ? 'period' : S.reportKind; // My hours has no daily view
 		S.mineDate = S.reportDate;
 		S.tab = 'mine';
 		render();
 		window.scrollTo(0, 0);
 	}
 
-	/**
-	 * Per-day table. Tapping a date opens a row under it with who worked that
-	 * day: hours and tips for day and night. Open rows are remembered while the
-	 * range stays the same, so they stay open when the page is redrawn.
-	 * Printing always shows every row open.
-	 */
+	/** Per-day totals; tapping a date opens that day in Reports → Daily. */
 	function dayTable(s) {
-		const rangeKey = s.from + '~' + s.to;
-		if (S.reportOpenRange !== rangeKey) {
-			S.reportOpen = {};
-			S.reportOpenRange = rangeKey;
-		}
-		const items = []; // {date, button, detail}
-		const allBtn = el('button', { type: 'button', class: 'btn small no-print', onclick: function () {
-			const open = !allOpen();
-			items.forEach(function (it) { setOpen(it, open); });
-		} });
-
-		function allOpen() {
-			return items.every(function (it) { return S.reportOpen[it.date]; });
-		}
-		function setOpen(it, open) {
-			if (open) {
-				S.reportOpen[it.date] = true;
-			} else {
-				delete S.reportOpen[it.date];
-			}
-			it.button.setAttribute('aria-expanded', open ? 'true' : 'false');
-			it.detail.classList.toggle('is-open', open);
-			allBtn.textContent = t(allOpen() ? 'collapseAll' : 'expandAll');
-		}
-
-		const rows = [];
-		s.days.forEach(function (d) {
-			const id = 'day-detail-' + d.date;
-			const it = { date: d.date };
-			it.button = el('button', {
-				type: 'button',
-				class: 'day-toggle',
-				'aria-controls': id,
-				title: t('showWhoWorked'),
-				onclick: function () { setOpen(it, !S.reportOpen[d.date]); },
-			}, [el('span', { class: 'chev', 'aria-hidden': 'true' }), niceDate(d.date, true)]);
-			it.detail = el('tr', { id: id, class: 'day-detail' }, el('td', { colspan: 8 }, dayStaff(d)));
-			items.push(it);
-			rows.push(el('tr', null, [
-				el('td', { class: 'name' }, it.button),
-				el('td', { class: 'num strong', text: d.totalTips === null ? t('missing') : money(d.totalTips) }),
-				el('td', { class: 'num day-col', text: money(d.dayTips) }),
-				el('td', { class: 'num night-col', text: d.totalTips === null ? '—' : money(d.nightTips) }),
-				el('td', { class: 'num', text: money(d.pool) }),
-				el('td', { class: 'num muted', text: d.perHourCents ? money(d.perHourCents) : '—' }),
-				el('td', { class: 'num', text: money(d.kitchen) }),
-				el('td', { class: 'num muted', text: d.leftover ? money(d.leftover) : '—' }),
-			]), it.detail);
-		});
-		items.forEach(function (it) { setOpen(it, !!S.reportOpen[it.date]); });
-
-		return el('div', null, [
-			el('div', { class: 'row section-head' }, [
-				el('h3', { class: 'section-title', text: t('perDayTitle') }),
-				allBtn,
-			]),
-			el('p', { class: 'muted small no-print', text: t('perDayHelp') }),
-			el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid day-grid' }, [
-				el('thead', null, el('tr', null, [
-					el('th', { text: t('date') }),
-					el('th', { class: 'num', text: t('colTotalTips') }),
-					el('th', { class: 'num day-col', text: t('colDayTips') }),
-					el('th', { class: 'num night-col', text: t('colNightTips') }),
-					el('th', { class: 'num', text: t('colServerPool', { pct: s.serverPct }) }),
-					el('th', { class: 'num', text: t('colPerHour') }),
-					el('th', { class: 'num', text: t('colKitchen', { pct: 100 - s.serverPct }) }),
-					el('th', { class: 'num', text: t('colLeftover') }),
-				])),
-				el('tbody', null, rows),
+		return el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
+			el('thead', null, el('tr', null, [
+				el('th', { text: t('date') }),
+				el('th', { class: 'num', text: t('colTotalTips') }),
+				el('th', { class: 'num day-col', text: t('colDayTips') }),
+				el('th', { class: 'num night-col', text: t('colNightTips') }),
+				el('th', { class: 'num', text: t('colServerPool', { pct: s.serverPct }) }),
+				el('th', { class: 'num', text: t('colPerHour') }),
+				el('th', { class: 'num', text: t('colKitchen', { pct: 100 - s.serverPct }) }),
+				el('th', { class: 'num', text: t('colLeftover') }),
 			])),
-		]);
+			el('tbody', null, s.days.map(function (d) {
+				const label = niceDate(d.date, true);
+				return el('tr', null, [
+					el('td', { class: 'name' }, el('button', {
+						type: 'button',
+						class: 'link',
+						title: t('openDay', { date: label }),
+						onclick: function () { openDay(d.date); },
+					}, label)),
+					el('td', { class: 'num strong', text: d.totalTips === null ? t('missing') : money(d.totalTips) }),
+					el('td', { class: 'num day-col', text: money(d.dayTips) }),
+					el('td', { class: 'num night-col', text: d.totalTips === null ? '—' : money(d.nightTips) }),
+					el('td', { class: 'num', text: money(d.pool) }),
+					el('td', { class: 'num muted', text: d.perHourCents ? money(d.perHourCents) : '—' }),
+					el('td', { class: 'num', text: money(d.kitchen) }),
+					el('td', { class: 'num muted', text: d.leftover ? money(d.leftover) : '—' }),
+				]);
+			})),
+		]));
 	}
 
-	/** Who worked on day `d`: day / night hours and tips per server. */
-	function dayStaff(d) {
-		const missingTotal = d.totalTips === null;
-		const pending = missingTotal && d.staff.some(function (x) { return x.nightHours > 0; });
-		function shiftCell(hours, tips, shift, mark) {
+	/**
+	 * Reports → Daily: one row per server who worked that day with day hours
+	 * and tips, night hours and tips, and their total for the day.
+	 */
+	function dailyTable(s) {
+		const d = s.days[0]; // missing when nothing was entered that day
+		if (!d || !d.staff.length) {
+			return el('p', { class: 'muted', text: t('noStaffThatDay') });
+		}
+		// Night tips are not final until the whole-day total is entered.
+		const pending = d.totalTips === null && d.staff.some(function (x) { return x.nightHours > 0; });
+		function cell(tag, hours, tips, cls, mark) {
 			if (!hours) {
-				return el('td', { class: 'num muted', text: '—' });
+				return el(tag, { class: 'num muted', text: '—' });
 			}
-			return el('td', { class: 'num ' + shift + '-col' }, [
-				el('span', { class: 'staff-hours', text: t('hoursShort', { h: C.formatHours(hours) }) }),
-				' ',
-				el('strong', { text: money(tips) + (mark ? ' *' : '') }),
+			return el(tag, { class: 'num ' + cls }, [
+				el('span', { class: 'cell-hours', text: t('hoursShort', { h: C.formatHours(hours) }) }),
+				el('span', { class: 'cell-money', text: money(tips) + (mark ? ' *' : '') }),
 			]);
 		}
-		const entryBtn = el('button', {
-			type: 'button',
-			class: 'btn small no-print',
-			onclick: function () {
-				S.tab = 'entry';
-				S.entryDate = d.date;
-				render();
-				window.scrollTo(0, 0);
-			},
-		}, t('openInEntry'));
-
-		if (!d.staff.length) {
-			return el('div', { class: 'day-box' }, [
-				el('p', { class: 'muted', text: t('noStaffThatDay') }),
-				entryBtn,
-			]);
+		function cells(tag, x) {
+			return [
+				cell(tag, x.dayHours, x.dayTips, 'day-col', false),
+				cell(tag, x.nightHours, x.nightTips, 'night-col', pending),
+				cell(tag, x.hours, x.tips, 'strong', pending && x.nightHours > 0),
+			];
 		}
-		return el('div', { class: 'day-box' }, [
-			el('table', { class: 'grid staff-grid' }, [
+		const tot = s.totals;
+		return el('div', null, [
+			el('div', { class: 'table-wrap' }, el('table', { class: 'grid daily-grid' }, [
 				el('thead', null, el('tr', null, [
 					el('th', { text: t('server') }),
 					el('th', { class: 'num day-col', text: t('day') }),
@@ -1352,25 +1366,22 @@
 				])),
 				el('tbody', null, d.staff.map(function (x) {
 					const name = x.name || t('unknownServer');
-					return el('tr', null, [
-						el('td', { class: 'name' }, x.name ? el('button', {
-							type: 'button',
-							class: 'link',
-							title: t('openPerson', { name: name }),
-							onclick: function () { openPerson(x.id); },
-						}, name) : name),
-						shiftCell(x.dayHours, x.dayTips, 'day', false),
-						shiftCell(x.nightHours, x.nightTips, 'night', missingTotal),
-						el('td', { class: 'num' }, [
-							el('span', { class: 'staff-hours', text: t('hoursShort', { h: C.formatHours(x.hours) }) }),
-							' ',
-							el('strong', { text: money(x.tips) + (pending && x.nightHours ? ' *' : '') }),
-						]),
-					]);
+					return el('tr', null, [el('td', { class: 'name' }, x.name ? el('button', {
+						type: 'button',
+						class: 'link',
+						title: t('openPerson', { name: name }),
+						onclick: function () { openPerson(x.id); },
+					}, name) : name)].concat(cells('td', x)));
 				})),
-			]),
-			pending ? el('p', { class: 'muted small day-note', text: t('mineMissingTotal') }) : null,
-			entryBtn,
+				el('tfoot', null, el('tr', null, [
+					el('th', { text: t('total') + ' (' + t(1 === d.staff.length ? 'peopleCountOne' : 'peopleCount', { n: d.staff.length }) + ')' }),
+				].concat(cells('th', {
+					dayHours: tot.dayHours, dayTips: tot.serverDayTips,
+					nightHours: tot.nightHours, nightTips: tot.serverNightTips,
+					hours: tot.hours, tips: tot.serverTips,
+				})))),
+			])),
+			pending ? el('p', { class: 'muted small', text: t('mineMissingTotal') }) : null,
 		]);
 	}
 
