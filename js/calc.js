@@ -368,7 +368,15 @@
 					dayHours: 0,
 					nightHours: 0,
 					perHourCents: 0,
+					staff: [], // who worked that day: [{id, name, dayHours, nightHours, dayTips, nightTips, hours, tips, perHourCents}]
 				};
+				const staff = {};
+				function staffRow(id) {
+					if (!staff[id]) {
+						staff[id] = Object.assign(emptyTotals(), { id: id, name: row(id).name });
+					}
+					return staff[id];
+				}
 				if (d.totalTips === null || d.totalTips === undefined) {
 					warnings.push({ type: 'missingTotal', date: d.date });
 				}
@@ -384,12 +392,14 @@
 						const sd = serverDay(e.key, d.date);
 						sd[shift + 'Hours'] += e.weight;
 						sd.hours += e.weight;
+						staffRow(e.key)[shift + 'Hours'] += e.weight;
 					});
 					Object.keys(r.shares).forEach(function (id) {
 						row(id)[shift + 'Tips'] += r.shares[id];
 						const sd = serverDay(id, d.date);
 						sd[shift + 'Tips'] += r.shares[id];
 						sd.tips += r.shares[id];
+						staffRow(id)[shift + 'Tips'] += r.shares[id];
 					});
 					detail.pool += r.pool;
 					detail.kitchen += r.kitchen;
@@ -404,6 +414,7 @@
 						warnings.push({ type: 'noHours', date: d.date, shift: shift, cents: r.unallocated });
 					}
 				});
+				detail.staff = Object.keys(staff).sort(byServerOrder).map(function (id) { return finishRow(staff[id]); });
 				const dayHours = detail.dayHours + detail.nightHours;
 				detail.perHourCents = dayHours > 0 ? Math.round(detail.paid * 100 / dayHours) : 0;
 				dayList.push(detail);
