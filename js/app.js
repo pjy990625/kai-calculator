@@ -15,7 +15,7 @@
 	const API = window.KaiApi;
 	const TOKEN_KEY = 'kai-calculator:token';
 	const LANG_KEY = 'kai-calculator:lang';
-	const ME_KEY = 'kai-calculator:me'; // which server "My hours" shows on this phone
+	const OLD_ME_KEY = 'kai-calculator:me'; // saved by the old "My hours" tab; removed on start
 
 	const S = {
 		token: null,
@@ -30,9 +30,9 @@
 		entryShiftDate: null, // the date entryShift was chosen for
 		reportKind: 'period', // 'day' | 'period' | 'month'
 		reportDate: null,
-		mineId: null,
-		mineKind: 'period',
-		mineDate: null,
+		personId: null, // Reports → one server's hours day by day
+		personKind: 'period', // 'period' | 'month'
+		personDate: null,
 	};
 	let lang = 'en';
 	let renderSeq = 0;
@@ -335,15 +335,15 @@
 		if (!S.reportDate) {
 			S.reportDate = S.today;
 		}
-		if (!S.mineDate) {
-			S.mineDate = S.today;
+		if (!S.personDate) {
+			S.personDate = S.today;
 		}
 	}
 
 	async function boot() {
 		lang = lsGet(LANG_KEY) || I.detect();
 		document.documentElement.lang = lang;
-		S.mineId = S.mineId || lsGet(ME_KEY);
+		lsRemove(OLD_ME_KEY);
 		if (!API.configured()) {
 			renderSetupNeeded();
 			return;
@@ -434,15 +434,16 @@
 		}
 		tabs.replaceChildren.apply(tabs, [
 			['entry', t('tabEntry')],
-			['mine', t('tabMine')],
 			['report', t('tabReport')],
 			['staff', t('tabStaff')],
 		].map(function (tb) {
+			// One server's day-by-day view is part of Reports.
+			const on = S.tab === tb[0] || ('person' === S.tab && 'report' === tb[0]);
 			return el('button', {
 				type: 'button',
 				role: 'tab',
-				class: 'tab' + (S.tab === tb[0] ? ' is-on' : ''),
-				'aria-selected': S.tab === tb[0] ? 'true' : 'false',
+				class: 'tab' + (on ? ' is-on' : ''),
+				'aria-selected': on ? 'true' : 'false',
 				onclick: function () {
 					S.tab = tb[0];
 					render();
@@ -474,8 +475,8 @@
 		const seq = ++renderSeq;
 		if ('report' === S.tab) {
 			renderReportTab(seq);
-		} else if ('mine' === S.tab) {
-			renderMineTab(seq);
+		} else if ('person' === S.tab) {
+			renderPersonView(seq);
 		} else if ('staff' === S.tab) {
 			setMain(renderStaffTab());
 		} else if ('settings' === S.tab) {
@@ -576,7 +577,7 @@
 				S.tab = 'entry';
 				S.entryDate = null;
 				S.reportDate = null;
-				S.mineDate = null;
+				S.personDate = null;
 				boot();
 			});
 		}
@@ -1129,7 +1130,7 @@
 	}
 
 	/**
-	 * Period switch + ‹ range › navigation, shared by Reports and My hours.
+	 * Period switch + ‹ range › navigation, shared by Reports and one server's view.
 	 * `withDay`: also offer Daily (Reports only), picked from a calendar.
 	 */
 	function rangeControls(kind, r, onKind, onDate, withDay) {
@@ -1283,12 +1284,12 @@
 		]));
 	}
 
-	/** Reports → My hours of one server, for the same range. */
+	/** Reports → one server's hours day by day, for the same range. */
 	function openPerson(id) {
-		S.mineId = id;
-		S.mineKind = 'day' === S.reportKind ? 'period' : S.reportKind; // My hours has no daily view
-		S.mineDate = S.reportDate;
-		S.tab = 'mine';
+		S.personId = id;
+		S.personKind = 'day' === S.reportKind ? 'period' : S.reportKind; // no daily view here
+		S.personDate = S.reportDate;
+		S.tab = 'person';
 		render();
 		window.scrollTo(0, 0);
 	}
@@ -1380,7 +1381,7 @@
 					hours: tot.hours, tips: tot.serverTips,
 				})))),
 			])),
-			pending ? el('p', { class: 'muted small', text: t('mineMissingTotal') }) : null,
+			pending ? el('p', { class: 'muted small', text: t('nightNotFinal') }) : null,
 		]);
 	}
 
@@ -1434,34 +1435,38 @@
 	/* My hours tab — one server's hours and tips, day by day              */
 	/* ------------------------------------------------------------------ */
 
-	function renderMineTab(seq) {
-		const known = S.servers.some(function (x) { return x.id === S.mineId; });
-		const id = known ? S.mineId : null;
-		// "Your name" with the dropdown on its right.
-		const picker = el('label', { class: 'field inline' }, [
-			el('span', { text: t('pickYourName') }),
-			el('select', {
-				onchange: function (e) {
-					S.mineId = e.target.value || null;
-					if (S.mineId) {
-						lsSet(ME_KEY, S.mineId);
-					}
-					render();
-				},
-			}, [el('option', { value: '', selected: !id }, '—')].concat(S.servers
-				.filter(function (x) { return x.active || x.id === id; })
-				.map(function (x) { return el('option', { value: x.id, selected: x.id === id }, x.name); }))),
-		]);
+	/** Back to Reports, on the range the server's view was showing. */
+	function backToReports() {
+		S.tab = 'report';
+		if ('day' !== S.reportKind) {
+			S.reportKind = S.personKind;
+			S.reportDate = S.personDate;
+		}
+		render();
+		window.scrollTo(0, 0);
+	}
 
-		if (!id) {
-			setMain(el('section', { class: 'card mine narrow' }, [
-				S.servers.length ? picker : null,
-				el('p', { class: 'muted', text: S.servers.length ? t('pickYourNameHelp') : t('noServersYet') }),
-			]));
+	/** Reports → one server: totals and hours/tips for each day they worked. */
+	function renderPersonView(seq) {
+		const id = S.personId;
+		if (!S.servers.some(function (x) { return x.id === id; })) {
+			backToReports(); // the server was removed meanwhile
 			return;
 		}
+		// Switch to another server without going back to Reports.
+		const picker = el('label', { class: 'field inline' }, [
+			el('span', { text: t('server') }),
+			el('select', {
+				onchange: function (e) {
+					S.personId = e.target.value;
+					render();
+				},
+			}, S.servers
+				.filter(function (x) { return x.active || x.id === id; })
+				.map(function (x) { return el('option', { value: x.id, selected: x.id === id }, x.name); })),
+		]);
 
-		const r = rangeFor(S.mineKind, S.mineDate);
+		const r = rangeFor(S.personKind, S.personDate);
 		loadRange(seq, r.from, r.to, function (range) {
 			const s = C.summarize(calcInput(range), r.from, r.to);
 			const row = s.rows.find(function (x) { return x.id === id; });
@@ -1474,19 +1479,20 @@
 			});
 			const pending = list.some(function (d) { return missing[d.date] && d.nightHours > 0; });
 
-			// One card: name, period, totals, then the day-by-day table.
-			return el('section', { class: 'card mine narrow' }, [
+			// One card: back, name, period, totals, then the day-by-day table.
+			return el('section', { class: 'card person narrow' }, [
+				el('div', { class: 'row' }, el('button', { type: 'button', class: 'btn ghost', onclick: backToReports }, t('backToReports'))),
 				picker,
-				el('div', { class: 'range-bar' }, rangeControls(S.mineKind, r,
-					function (v) { S.mineKind = v; render(); },
-					function (d) { S.mineDate = d; render(); }
+				el('div', { class: 'range-bar' }, rangeControls(S.personKind, r,
+					function (v) { S.personKind = v; render(); },
+					function (d) { S.personDate = d; render(); }
 				)),
 				el('div', { class: 'cards three' }, [
-					statCard(t('cardMyHours'), C.formatHours(row ? row.hours : 0), 'accent'),
-					statCard(t('cardMyTips'), money(row ? row.tips : 0), ''),
+					statCard(t('colHours'), C.formatHours(row ? row.hours : 0), 'accent'),
+					statCard(t('colTips'), money(row ? row.tips : 0), ''),
 					statCard(t('colPerHour'), money(row ? row.perHourCents : 0), ''),
 				]),
-				list.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid mine-grid' }, [
+				list.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
 					el('thead', null, el('tr', null, [
 						el('th', { text: t('date') }),
 						el('th', { class: 'num', text: t('colHours') }),
@@ -1505,7 +1511,7 @@
 						el('th', { class: 'num', text: money(row ? row.tips : 0) }),
 					])),
 				])) : el('p', { class: 'muted', text: t('noWorkInRange') }),
-				pending ? el('p', { class: 'muted small', text: t('mineMissingTotal') }) : null,
+				pending ? el('p', { class: 'muted small', text: t('nightNotFinal') }) : null,
 			]);
 		});
 	}
