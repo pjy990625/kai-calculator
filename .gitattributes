@@ -1,0 +1,5 @@
+# Same bytes on every computer, so the ?v= file hashes in index.html
+# (scripts/stamp-assets.js) match what CI and GitHub Pages see.
+*.html text eol=lf
+*.css  text eol=lf
+*.js   text eol=lf
