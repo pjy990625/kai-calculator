@@ -15,7 +15,6 @@
 	const API = window.KaiApi;
 	const TOKEN_KEY = 'kai-calculator:token';
 	const LANG_KEY = 'kai-calculator:lang';
-	const OLD_ME_KEY = 'kai-calculator:me'; // saved by the old "My hours" tab; removed on start
 
 	const S = {
 		token: null,
@@ -30,9 +29,7 @@
 		entryShiftDate: null, // the date entryShift was chosen for
 		reportKind: 'period', // 'day' | 'period' | 'month'
 		reportDate: null,
-		personId: null, // Reports → one server's hours day by day
-		personKind: 'period', // 'period' | 'month'
-		personDate: null,
+		personId: null, // set: Reports shows this server's hours day by day
 	};
 	let lang = 'en';
 	let renderSeq = 0;
@@ -335,15 +332,11 @@
 		if (!S.reportDate) {
 			S.reportDate = S.today;
 		}
-		if (!S.personDate) {
-			S.personDate = S.today;
-		}
 	}
 
 	async function boot() {
 		lang = lsGet(LANG_KEY) || I.detect();
 		document.documentElement.lang = lang;
-		lsRemove(OLD_ME_KEY);
 		if (!API.configured()) {
 			renderSetupNeeded();
 			return;
@@ -437,8 +430,7 @@
 			['report', t('tabReport')],
 			['staff', t('tabStaff')],
 		].map(function (tb) {
-			// One server's day-by-day view is part of Reports.
-			const on = S.tab === tb[0] || ('person' === S.tab && 'report' === tb[0]);
+			const on = S.tab === tb[0];
 			return el('button', {
 				type: 'button',
 				role: 'tab',
@@ -446,6 +438,7 @@
 				'aria-selected': on ? 'true' : 'false',
 				onclick: function () {
 					S.tab = tb[0];
+					S.personId = null; // a tab always opens on its main view
 					render();
 				},
 			}, tb[1]);
@@ -475,8 +468,6 @@
 		const seq = ++renderSeq;
 		if ('report' === S.tab) {
 			renderReportTab(seq);
-		} else if ('person' === S.tab) {
-			renderPersonView(seq);
 		} else if ('staff' === S.tab) {
 			setMain(renderStaffTab());
 		} else if ('settings' === S.tab) {
@@ -577,7 +568,7 @@
 				S.tab = 'entry';
 				S.entryDate = null;
 				S.reportDate = null;
-				S.personDate = null;
+				S.personId = null;
 				boot();
 			});
 		}
@@ -1156,6 +1147,10 @@
 	}
 
 	function renderReportTab(seq) {
+		if (S.personId) {
+			renderPersonView(seq);
+			return;
+		}
 		const r = rangeFor(S.reportKind, S.reportDate);
 		loadRange(seq, r.from, r.to, function (range) {
 			return renderReportBody(C.summarize(calcInput(range), r.from, r.to), r);
@@ -1287,9 +1282,6 @@
 	/** Reports → one server's hours day by day, for the same range. */
 	function openPerson(id) {
 		S.personId = id;
-		S.personKind = 'day' === S.reportKind ? 'period' : S.reportKind; // no daily view here
-		S.personDate = S.reportDate;
-		S.tab = 'person';
 		render();
 		window.scrollTo(0, 0);
 	}
@@ -1432,16 +1424,12 @@
 	}
 
 	/* ------------------------------------------------------------------ */
-	/* My hours tab — one server's hours and tips, day by day              */
+	/* Reports → one server's hours and tips, day by day                   */
 	/* ------------------------------------------------------------------ */
 
 	/** Back to Reports, on the range the server's view was showing. */
 	function backToReports() {
-		S.tab = 'report';
-		if ('day' !== S.reportKind) {
-			S.reportKind = S.personKind;
-			S.reportDate = S.personDate;
-		}
+		S.personId = null;
 		render();
 		window.scrollTo(0, 0);
 	}
@@ -1466,7 +1454,9 @@
 				.map(function (x) { return el('option', { value: x.id, selected: x.id === id }, x.name); })),
 		]);
 
-		const r = rangeFor(S.personKind, S.personDate);
+		// Uses the Reports range, so going back shows the same period. No daily view here.
+		const kind = 'day' === S.reportKind ? 'period' : S.reportKind;
+		const r = rangeFor(kind, S.reportDate);
 		loadRange(seq, r.from, r.to, function (range) {
 			const s = C.summarize(calcInput(range), r.from, r.to);
 			const row = s.rows.find(function (x) { return x.id === id; });
@@ -1483,9 +1473,9 @@
 			return el('section', { class: 'card person narrow' }, [
 				el('div', { class: 'row back-row' }, el('button', { type: 'button', class: 'btn ghost', onclick: backToReports }, t('backToReports'))),
 				picker,
-				el('div', { class: 'range-bar' }, rangeControls(S.personKind, r,
-					function (v) { S.personKind = v; render(); },
-					function (d) { S.personDate = d; render(); }
+				el('div', { class: 'range-bar' }, rangeControls(kind, r,
+					function (v) { S.reportKind = v; render(); },
+					function (d) { S.reportDate = d; render(); }
 				)),
 				el('div', { class: 'cards three' }, [
 					statCard(t('colHours'), C.formatHours(row ? row.hours : 0), 'accent'),

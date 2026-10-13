@@ -21,7 +21,8 @@ const path = require('node:path');
 const ROOT = path.join(__dirname, '..');
 const INDEX = path.join(ROOT, 'index.html');
 // href="css/style.css" or src="js/app.js", with or without an existing ?v=…
-const ASSET = /\b(href|src)="((?:css|js)\/[\w.-]+\.(?:css|js))(?:\?v=[^"]*)?"/g;
+// Groups: 1 attribute, 2 file, 3 current version (if any).
+const ASSET = /\b(href|src)="((?:css|js)\/[\w.-]+\.(?:css|js))(?:\?v=([^"]*))?"/g;
 
 function versionOf(file) {
 	return crypto.createHash('sha256').update(fs.readFileSync(path.join(ROOT, file))).digest('hex').slice(0, 10);
@@ -36,8 +37,8 @@ function stamped(html) {
 
 /** Local assets index.html loads: [{ file, version }] (version null when missing). */
 function assets(html) {
-	return Array.from(html.matchAll(/\b(?:href|src)="((?:css|js)\/[^"?]+)(?:\?v=([^"]*))?"/g), function (m) {
-		return { file: m[1], version: m[2] || null };
+	return Array.from(html.matchAll(ASSET), function (m) {
+		return { file: m[2], version: m[3] || null };
 	});
 }
 

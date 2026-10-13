@@ -197,6 +197,7 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 	border: 0; background: none; color: var(--muted);
 	padding: 6px 14px; min-height: 34px;
 	border-radius: 6px;
+	white-space: nowrap; /* "Bi-weekly" never breaks */
 	cursor: pointer;
 }
 .segmented button.is-on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
@@ -280,11 +281,12 @@ button.link {
 .field.inline > span { flex: none; font-size: .95rem; color: var(--text); }
 .field.inline > select { flex: 1 1 auto; min-width: 0; }
 .range-bar {
-	display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+	display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
 	gap: 8px 12px; margin: 4px 0 16px;
 }
-.range-bar .row.nav { flex: 1 1 auto; justify-content: flex-end; }
-.range-bar .row.date-nav { flex: 1 1 auto; justify-content: flex-end; }
+/* On one line the period switch sits left and ‹ range › right; when they
+   don't fit (narrow screen, longer labels), the range centers on its own line. */
+.range-bar > .segmented { margin-right: auto; }
 /* Narrow phones: My tips gets a full row on top, hours and per-hour share the next. */
 @media (max-width: 420px) {
 	.card.person .cards.three { grid-template-columns: 1fr 1fr; }
@@ -408,12 +410,9 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.entry-grid small .part { display: block; }
 	.entry-grid small .sep { display: none; }
 	.report-head h2 { font-size: 1.2rem; }
-	/* Period switch and ‹ range › each get their own full line: switch buttons
-	   share the width (never breaking "Bi-weekly"), the range sits in the middle (instead of wrapping to the right). */
-	.range-bar { flex-direction: column; align-items: stretch; }
-	.range-bar .segmented { display: flex; }
-	.range-bar .segmented button { flex: 1 1 auto; padding-left: 8px; padding-right: 8px; white-space: nowrap; }
-	.range-bar .row.nav, .range-bar .row.date-nav { justify-content: center; }
+	/* The period switch takes the full width (easier to tap); ‹ range › centers below it. */
+	.range-bar > .segmented { display: flex; flex: 1 1 100%; margin-right: 0; }
+	.range-bar .segmented button { flex: 1 1 auto; padding-left: 8px; padding-right: 8px; }
 }
 
 /* Phone held sideways: little height, so the header scrolls away instead of staying on top. */
