@@ -112,13 +112,24 @@ test("rounding rule: 50.50 / 60.70 / 60.70 / 40.10 → round the 60.70s up, tota
 	assert.deepEqual(wd([5050, 6070, 6070, 4010]), [50, 61, 61, 40]);
 });
 
-test('rounding rule: same fraction (same hours) → both up or neither', () => {
-	// Pool $211.90 → at most $211; only $1 spare but two people tie at .70 → nobody goes up.
-	assert.deepEqual(wd([5040, 6070, 6070, 4010]), [50, 60, 60, 40]);
-	// A smaller fraction (50.50) never jumps ahead of a tied group that did not fit.
-	assert.deepEqual(wd([5050, 6070, 6070, 4000]), [50, 60, 60, 40]);
-	// Below .50 always rounds down, even when there is room.
-	assert.deepEqual(wd([5040, 5040, 20]), [50, 50, 0]); // pool $101, $1 left over
+test('rounding rule: same fraction (same hours) → both up or neither; the next fraction gets the dollar', () => {
+	// Pool $211.90 → at most $211; only $1 spare and two people tie at .70 → the .40 gets it.
+	assert.deepEqual(wd([5040, 6070, 6070, 4010]), [51, 60, 60, 40]);
+	assert.deepEqual(wd([5050, 6070, 6070, 4000]), [51, 60, 60, 40]);
+	// Below .50 is rounded up too when a dollar is spare (pool $101 → nothing left over).
+	assert.deepEqual(wd([5040, 5040, 20]), [50, 50, 1]);
+	assert.deepEqual(wd([5030, 5030, 5030, 1020]), [50, 50, 50, 11]); // pool $161.10, 2 tied short of 3
+	// Only a tied group too big for the spare dollars is left: nobody goes up ($1 left over).
+	assert.deepEqual(wd([5050, 5050]), [50, 50]);
+	assert.deepEqual(wd([3340, 3330, 3330]), [34, 33, 33]); // pool $100: .40 first, the tied .30s skip
+});
+
+test('rounding rule: a shift leaves under $1 unless only a tied group is left', () => {
+	for (let tips = 0; tips < 80000; tips += 61) {
+		const entries = [{ key: 'a', weight: 700 }, { key: 'b', weight: 550 }, { key: 'c', weight: 425 }, { key: 'd', weight: 310 }];
+		const r = C.splitShift(tips, 60, entries);
+		assert.ok(r.leftover < 100, tips + ': leftover ' + r.leftover);
+	}
 });
 
 test('rounding rule: whole dollars, never above the pool, through splitShift', () => {
@@ -128,13 +139,13 @@ test('rounding rule: whole dollars, never above the pool, through splitShift', (
 		const paid = Object.values(r.shares).reduce((a, b) => a + b, 0);
 		assert.equal(r.paid, paid);
 		assert.ok(Object.values(r.shares).every((c) => c % 100 === 0), 'whole dollars');
-		assert.ok(paid * 100 <= tips * 60, 'never above 60% of the tips');
+		assert.ok(paid <= r.pool, 'never above the servers\' pool');
 		assert.equal(r.shares.a, r.shares.b, 'same hours → same pay');
 		assert.equal(paid + r.leftover + r.kitchen, tips);
-		// Each person is within $1 of their exact share, and rounding only goes up from .50.
+		// Each person gets the whole dollars of their exact share, or one dollar more.
 		for (const e of entries) {
 			const exact = tips * 60 * e.weight / 100 / 1233;
-			assert.ok(r.shares[e.key] <= Math.round(exact / 100) * 100 && r.shares[e.key] >= Math.floor(exact / 100) * 100);
+			assert.ok(r.shares[e.key] <= Math.ceil(exact / 100) * 100 && r.shares[e.key] >= Math.floor(exact / 100) * 100);
 		}
 	}
 });

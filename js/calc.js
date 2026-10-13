@@ -14,10 +14,12 @@
  *               server A      = servers' pool ÷ all servers' hours on that shift × A's hours
  *
  * Rounding rule (the restaurant's): each server's share is paid in WHOLE
- * DOLLARS. Shares of .50 or more round up, largest fraction first, but only
- * while the servers' total stays at or below the servers' pool. Servers with
- * the same fraction (e.g. the same hours) are rounded up together or not at
- * all. Whatever is left of the pool is reported as `leftover`.
+ * DOLLARS. Everyone gets the whole dollars of their exact share; the spare
+ * dollars of the pool then go to the largest fractions first, so a shift
+ * normally has less than $1 left over. Servers with the same fraction (e.g.
+ * the same hours) are rounded up together or not at all; a group that does
+ * not fit is skipped and the next fraction gets the dollar. Whatever is left
+ * of the pool is reported as `leftover`.
  */
 (function (root, factory) {
 	'use strict';
@@ -208,12 +210,13 @@
 	 * Split the servers' pool of one shift into WHOLE DOLLARS (returned in cents).
 	 *
 	 * Exact share of A = tips × pct% × A's hours ÷ all hours. Everyone first gets
-	 * the whole dollars of their exact share. Then shares whose fraction is .50
-	 * or more are rounded up, the largest fraction first, while the sum stays
-	 * <= tips × pct% (the servers' pool). People with the same fraction are one
-	 * group: if the group does not fit as a whole, nobody in it is rounded up,
-	 * and nobody with a smaller fraction is rounded up either (no one jumps the
-	 * queue). All arithmetic is in integers, so there are no float errors.
+	 * the whole dollars of their exact share. The spare whole dollars of the pool
+	 * (serverPool, never exceeded) then go one each to the largest fractions
+	 * first, whatever the fraction (.30 too), until none are left. People with
+	 * the same fraction are one group: if the group does not fit as a whole,
+	 * nobody in it is rounded up and the next smaller fraction is tried. So the
+	 * leftover is under $1 unless only tied groups too big for the spare dollars
+	 * remain. All arithmetic is in integers, so there are no float errors.
 	 *
 	 * @param {number} tips integer cents
 	 * @param {number} pct servers' percent (0–100)
@@ -228,7 +231,7 @@
 		}
 		// Exact share in dollars = tips·pct·w / (100 cents · 100 % · sumW).
 		const den = 10000 * sumW;
-		const maxDollars = Math.floor(tips * pct / 10000); // the sum may never exceed the pool
+		const maxDollars = Math.floor(serverPool(tips, pct) / 100); // the sum may never exceed the pool
 		let given = 0;
 		const rems = {};
 		entries.forEach(function (e) {
@@ -237,19 +240,18 @@
 			out[e.key] = dollars * 100;
 			given += dollars;
 			const rem = exact % den;
-			if (rem * 2 >= den) { // fraction >= .50 → wants to round up
+			if (rem > 0) { // has a fraction → may get one of the spare dollars
 				(rems[rem] = rems[rem] || []).push(e.key);
 			}
 		});
 		let spare = maxDollars - given;
 		const groups = Object.keys(rems).map(Number).sort(function (a, b) { return b - a; });
-		for (let i = 0; i < groups.length; i++) {
+		for (let i = 0; i < groups.length && spare > 0; i++) {
 			const keys = rems[groups[i]];
-			if (keys.length > spare) {
-				break;
+			if (keys.length <= spare) { // a tied group that does not fit is skipped
+				keys.forEach(function (k) { out[k] += 100; });
+				spare -= keys.length;
 			}
-			keys.forEach(function (k) { out[k] += 100; });
-			spare -= keys.length;
 		}
 		return out;
 	}
