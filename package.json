@@ -5,6 +5,7 @@
   "description": "Restaurant tip calculator — 60/40 day/night tip split by hours, shared Supabase database, 2-week reports",
   "scripts": {
     "test": "node --test tests/*.test.js",
+    "stamp": "node scripts/stamp-assets.js",
     "test:db": "bash tests/db/run.sh",
     "start": "python3 -m http.server 8000"
   },

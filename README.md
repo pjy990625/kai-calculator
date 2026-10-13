@@ -171,14 +171,23 @@ js/calc.js              순수 계산 로직 — 60/40 분배, 기간 (DOM/네�
 js/i18n.js              한국어 / 영어 문자열
 js/app.js               화면 (로그인, 입력, 리포트, 서버, 설정)
 supabase/setup.sql      DB 테이블 + 권한 규칙 + API 함수
-tests/*.test.js         계산 / 번역 단위 테스트 (Node 18+)
+scripts/stamp-assets.js index.html의 css/js 주소에 버전(?v=) 붙이기 (npm run stamp)
+tests/*.test.js         계산 / 번역 / 버전 단위 테스트 (Node 18+)
 tests/db/               setup.sql을 실제 PostgreSQL에서 검증하는 테스트
 ```
 
 ```bash
 npm test          # 단위 테스트
+npm run stamp     # css/ 나 js/ 를 고친 뒤: index.html의 ?v= 버전 갱신
 npm run test:db   # DB 테스트 (PostgreSQL 15+ 서버 필요, CI에서 자동 실행)
 ```
+
+- **`css/`나 `js/` 파일을 고쳤으면 `npm run stamp`를 실행하고 바뀐 `index.html`도 같이 커밋하세요.**
+  `index.html`은 각 파일을 `style.css?v=f8e73beeca`처럼 **파일 내용으로 만든 버전**을 붙여 불러옵니다.
+  파일이 바뀌면 주소도 바뀌어서 휴대폰이 캐시에 남은 예전 파일 대신 새 파일을 바로 받고,
+  새 JS와 예전 CSS가 섞이는 일이 없습니다. 잊어버리면 `npm test`(와 CI)가 실패해서 알려 줍니다.
+  (`index.html` 자체는 GitHub Pages가 최대 10분 캐시하므로, 배포 직후 몇 분은 예전 화면이 보일 수 있습니다.
+  이때도 예전 파일끼리만 쓰므로 화면이 깨지지는 않습니다.)
 
 - 화면 문자열을 추가하면 `js/i18n.js`의 `en`, `ko` **둘 다** 추가하세요 (테스트가 확인합니다).
 - DB 함수에 새 에러 코드를 추가하면 `js/api.js`의 `KNOWN`과 `i18n.js`의 `err_코드`도 추가하세요 (테스트가 확인합니다).
