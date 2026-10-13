@@ -30,6 +30,18 @@ test('parseMoney', () => {
 	assert.equal(C.parseMoney('12,345.67'), 1234567);
 });
 
+test('centsToInput drops .00 and reads back the same amount', () => {
+	assert.equal(C.centsToInput(35000), '350');
+	assert.equal(C.centsToInput(0), '0');
+	assert.equal(C.centsToInput(1250), '12.50');
+	assert.equal(C.centsToInput(5), '0.05');
+	assert.equal(C.centsToInput(100000000), '1000000');
+	for (const c of [0, 5, 99, 100, 1250, 35000, 99999999, 100000000]) {
+		assert.equal(C.parseMoney(C.centsToInput(c)), c);
+	}
+	assert.equal(C.centsToPlain(35000), '350.00'); // CSV keeps two decimals
+});
+
 test('parseHours / formatHours', () => {
 	assert.equal(C.parseHours('5'), 500);
 	assert.equal(C.parseHours('5.5'), 550);
