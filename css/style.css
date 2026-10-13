@@ -366,8 +366,7 @@ button.link {
 .save-status.saved { color: var(--accent); }
 .save-status.blocked, .save-status.failed { color: var(--danger); }
 .save-status .btn { flex: none; }
-.notice.lock, .notice.info { background: var(--surface-2); border: 1px solid var(--line); }
-.notice.info { font-weight: 500; }
+.notice.lock { background: var(--surface-2); border: 1px solid var(--line); }
 .entry-grid small { font-weight: 400; font-size: .75rem; }
 .entry-grid small .part { white-space: nowrap; }
 input:disabled { opacity: .65; background: var(--surface-2); }
