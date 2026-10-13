@@ -203,14 +203,16 @@
 		return formatters[key] || (formatters[key] = make(locale()));
 	}
 
+	/** $430 for whole dollars, $40.91 when there are cents (never $40.9). */
 	function money(cents) {
-		return formatter('money', function (loc) {
+		const digits = cents % 100 === 0 ? 0 : 2;
+		return formatter('money' + digits, function (loc) {
 			return new Intl.NumberFormat(loc, {
 				style: 'currency',
 				currency: 'USD',
 				currencyDisplay: 'narrowSymbol',
-				minimumFractionDigits: 2,
-				maximumFractionDigits: 2,
+				minimumFractionDigits: digits,
+				maximumFractionDigits: digits,
 			});
 		}).format(cents / 100);
 	}
@@ -647,11 +649,11 @@
 
 		const dayTipsInput = el('input', {
 			id: 'day-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0.00',
-			value: rec ? C.centsToPlain(rec.dayTips) : '', disabled: !!locked, oninput: onInput('day'),
+			value: rec ? C.centsToInput(rec.dayTips) : '', disabled: !!locked, oninput: onInput('day'),
 		});
 		const totalInput = el('input', {
 			id: 'total-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0.00',
-			value: rec && rec.totalTips !== null ? C.centsToPlain(rec.totalTips) : '', disabled: !!locked, oninput: onInput('night'),
+			value: rec && rec.totalTips !== null ? C.centsToInput(rec.totalTips) : '', disabled: !!locked, oninput: onInput('night'),
 		});
 		const nightOut = el('output', { id: 'night-tips', class: 'computed' }, '—');
 		// Shown on a saved day for as long as the whole-day total is still empty.

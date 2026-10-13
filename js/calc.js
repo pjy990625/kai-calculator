@@ -154,9 +154,14 @@
 		return (h / 100).toFixed(2).replace(/\.?0+$/, '');
 	}
 
-	/** 1250 → "12.50" (plain, for inputs and CSV) */
+	/** 1250 → "12.50" (plain, for CSV) */
 	function centsToPlain(c) {
 		return (c / 100).toFixed(2);
+	}
+
+	/** For a money input: 35000 → "350", 1250 → "12.50". */
+	function centsToInput(c) {
+		return c % 100 === 0 ? String(c / 100) : centsToPlain(c);
 	}
 
 	function cleanName(s) {
@@ -459,6 +464,7 @@
 		parseHours: parseHours,
 		formatHours: formatHours,
 		centsToPlain: centsToPlain,
+		centsToInput: centsToInput,
 		cleanName: cleanName,
 		sortServers: sortServers,
 		sumWeights: sumWeights,
