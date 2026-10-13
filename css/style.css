@@ -286,8 +286,8 @@ button.link {
 .range-bar .row.date-nav { flex: 1 1 auto; justify-content: flex-end; }
 /* Narrow phones: My tips gets a full row on top, hours and per-hour share the next. */
 @media (max-width: 420px) {
-	.card.mine .cards.three { grid-template-columns: 1fr 1fr; }
-	.card.mine .cards.three .stat:nth-child(2) { grid-column: 1 / -1; order: -1; }
+	.card.person .cards.three { grid-template-columns: 1fr 1fr; }
+	.card.person .cards.three .stat:nth-child(2) { grid-column: 1 / -1; order: -1; }
 }
 .stat.accent .stat-value { color: var(--accent); }
 
