@@ -30,6 +30,8 @@
 		entryShiftDate: null, // the date entryShift was chosen for
 		reportKind: 'period',
 		reportDate: null,
+		reportOpen: {}, // Reports → Per day: dates whose "who worked" row is open
+		reportOpenRange: null, // the range reportOpen belongs to (closed again when the range changes)
 		mineId: null,
 		mineKind: 'period',
 		mineDate: null,
@@ -1174,7 +1176,6 @@
 		parts.push(s.rows.length ? personTable(s.rows, tot) : el('p', { class: 'muted', text: t('noData') }));
 
 		if (s.days.length) {
-			parts.push(el('h3', { class: 'section-title', text: t('perDayTitle') }));
 			parts.push(dayTable(s));
 		}
 		parts.push(el('div', { class: 'row actions no-print' }, [
@@ -1211,14 +1212,7 @@
 					type: 'button',
 					class: 'link',
 					title: t('openPerson', { name: name }),
-					onclick: function () {
-						S.mineId = r.id;
-						S.mineKind = S.reportKind;
-						S.mineDate = S.reportDate;
-						S.tab = 'mine';
-						render();
-						window.scrollTo(0, 0);
-					},
+					onclick: function () { openPerson(r.id); },
 				}, name) : name)].concat(cells(r, 'td')));
 			})),
 			el('tfoot', null, el('tr', null, [el('th', { text: t('total') })].concat(cells({
@@ -1227,31 +1221,157 @@
 		]));
 	}
 
+	/** Reports → My hours of one server, for the same range. */
+	function openPerson(id) {
+		S.mineId = id;
+		S.mineKind = S.reportKind;
+		S.mineDate = S.reportDate;
+		S.tab = 'mine';
+		render();
+		window.scrollTo(0, 0);
+	}
+
+	/**
+	 * Per-day table. Tapping a date opens a row under it with who worked that
+	 * day: hours and tips for day and night. Open rows are remembered while the
+	 * range stays the same, so they stay open when the page is redrawn.
+	 * Printing always shows every row open.
+	 */
 	function dayTable(s) {
-		return el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
-			el('thead', null, el('tr', null, [
-				el('th', { text: t('date') }),
-				el('th', { class: 'num', text: t('colTotalTips') }),
-				el('th', { class: 'num day-col', text: t('colDayTips') }),
-				el('th', { class: 'num night-col', text: t('colNightTips') }),
-				el('th', { class: 'num', text: t('colServerPool', { pct: s.serverPct }) }),
-				el('th', { class: 'num', text: t('colPerHour') }),
-				el('th', { class: 'num', text: t('colKitchen', { pct: 100 - s.serverPct }) }),
-				el('th', { class: 'num', text: t('colLeftover') }),
+		const rangeKey = s.from + '~' + s.to;
+		if (S.reportOpenRange !== rangeKey) {
+			S.reportOpen = {};
+			S.reportOpenRange = rangeKey;
+		}
+		const items = []; // {date, button, detail}
+		const allBtn = el('button', { type: 'button', class: 'btn small no-print', onclick: function () {
+			const open = !allOpen();
+			items.forEach(function (it) { setOpen(it, open); });
+		} });
+
+		function allOpen() {
+			return items.every(function (it) { return S.reportOpen[it.date]; });
+		}
+		function setOpen(it, open) {
+			if (open) {
+				S.reportOpen[it.date] = true;
+			} else {
+				delete S.reportOpen[it.date];
+			}
+			it.button.setAttribute('aria-expanded', open ? 'true' : 'false');
+			it.detail.classList.toggle('is-open', open);
+			allBtn.textContent = t(allOpen() ? 'collapseAll' : 'expandAll');
+		}
+
+		const rows = [];
+		s.days.forEach(function (d) {
+			const id = 'day-detail-' + d.date;
+			const it = { date: d.date };
+			it.button = el('button', {
+				type: 'button',
+				class: 'day-toggle',
+				'aria-controls': id,
+				title: t('showWhoWorked'),
+				onclick: function () { setOpen(it, !S.reportOpen[d.date]); },
+			}, [el('span', { class: 'chev', 'aria-hidden': 'true' }), niceDate(d.date, true)]);
+			it.detail = el('tr', { id: id, class: 'day-detail' }, el('td', { colspan: 8 }, dayStaff(d)));
+			items.push(it);
+			rows.push(el('tr', null, [
+				el('td', { class: 'name' }, it.button),
+				el('td', { class: 'num strong', text: d.totalTips === null ? t('missing') : money(d.totalTips) }),
+				el('td', { class: 'num day-col', text: money(d.dayTips) }),
+				el('td', { class: 'num night-col', text: d.totalTips === null ? '—' : money(d.nightTips) }),
+				el('td', { class: 'num', text: money(d.pool) }),
+				el('td', { class: 'num muted', text: d.perHourCents ? money(d.perHourCents) : '—' }),
+				el('td', { class: 'num', text: money(d.kitchen) }),
+				el('td', { class: 'num muted', text: d.leftover ? money(d.leftover) : '—' }),
+			]), it.detail);
+		});
+		items.forEach(function (it) { setOpen(it, !!S.reportOpen[it.date]); });
+
+		return el('div', null, [
+			el('div', { class: 'row section-head' }, [
+				el('h3', { class: 'section-title', text: t('perDayTitle') }),
+				allBtn,
+			]),
+			el('p', { class: 'muted small no-print', text: t('perDayHelp') }),
+			el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid day-grid' }, [
+				el('thead', null, el('tr', null, [
+					el('th', { text: t('date') }),
+					el('th', { class: 'num', text: t('colTotalTips') }),
+					el('th', { class: 'num day-col', text: t('colDayTips') }),
+					el('th', { class: 'num night-col', text: t('colNightTips') }),
+					el('th', { class: 'num', text: t('colServerPool', { pct: s.serverPct }) }),
+					el('th', { class: 'num', text: t('colPerHour') }),
+					el('th', { class: 'num', text: t('colKitchen', { pct: 100 - s.serverPct }) }),
+					el('th', { class: 'num', text: t('colLeftover') }),
+				])),
+				el('tbody', null, rows),
 			])),
-			el('tbody', null, s.days.map(function (d) {
-				return el('tr', null, [
-					el('td', { class: 'name', text: niceDate(d.date, true) }),
-					el('td', { class: 'num strong', text: d.totalTips === null ? t('missing') : money(d.totalTips) }),
-					el('td', { class: 'num day-col', text: money(d.dayTips) }),
-					el('td', { class: 'num night-col', text: d.totalTips === null ? '—' : money(d.nightTips) }),
-					el('td', { class: 'num', text: money(d.pool) }),
-					el('td', { class: 'num muted', text: d.perHourCents ? money(d.perHourCents) : '—' }),
-					el('td', { class: 'num', text: money(d.kitchen) }),
-					el('td', { class: 'num muted', text: d.leftover ? money(d.leftover) : '—' }),
-				]);
-			})),
-		]));
+		]);
+	}
+
+	/** Who worked on day `d`: day / night hours and tips per server. */
+	function dayStaff(d) {
+		const missingTotal = d.totalTips === null;
+		const pending = missingTotal && d.staff.some(function (x) { return x.nightHours > 0; });
+		function shiftCell(hours, tips, shift, mark) {
+			if (!hours) {
+				return el('td', { class: 'num muted', text: '—' });
+			}
+			return el('td', { class: 'num ' + shift + '-col' }, [
+				el('span', { class: 'staff-hours', text: t('hoursShort', { h: C.formatHours(hours) }) }),
+				' ',
+				el('strong', { text: money(tips) + (mark ? ' *' : '') }),
+			]);
+		}
+		const entryBtn = el('button', {
+			type: 'button',
+			class: 'btn small no-print',
+			onclick: function () {
+				S.tab = 'entry';
+				S.entryDate = d.date;
+				render();
+				window.scrollTo(0, 0);
+			},
+		}, t('openInEntry'));
+
+		if (!d.staff.length) {
+			return el('div', { class: 'day-box' }, [
+				el('p', { class: 'muted', text: t('noStaffThatDay') }),
+				entryBtn,
+			]);
+		}
+		return el('div', { class: 'day-box' }, [
+			el('table', { class: 'grid staff-grid' }, [
+				el('thead', null, el('tr', null, [
+					el('th', { text: t('server') }),
+					el('th', { class: 'num day-col', text: t('day') }),
+					el('th', { class: 'num night-col', text: t('night') }),
+					el('th', { class: 'num', text: t('total') }),
+				])),
+				el('tbody', null, d.staff.map(function (x) {
+					const name = x.name || t('unknownServer');
+					return el('tr', null, [
+						el('td', { class: 'name' }, x.name ? el('button', {
+							type: 'button',
+							class: 'link',
+							title: t('openPerson', { name: name }),
+							onclick: function () { openPerson(x.id); },
+						}, name) : name),
+						shiftCell(x.dayHours, x.dayTips, 'day', false),
+						shiftCell(x.nightHours, x.nightTips, 'night', missingTotal),
+						el('td', { class: 'num' }, [
+							el('span', { class: 'staff-hours', text: t('hoursShort', { h: C.formatHours(x.hours) }) }),
+							' ',
+							el('strong', { text: money(x.tips) + (pending && x.nightHours ? ' *' : '') }),
+						]),
+					]);
+				})),
+			]),
+			pending ? el('p', { class: 'muted small day-note', text: t('mineMissingTotal') }) : null,
+			entryBtn,
+		]);
 	}
 
 	function csvCell(v) {
@@ -1288,6 +1408,15 @@
 		});
 		lines.push([t('total'), C.centsToPlain(s.totals.tips), C.centsToPlain(s.totals.dayTips), C.centsToPlain(s.totals.nightTips),
 			C.centsToPlain(s.totals.pool), C.centsToPlain(s.totals.perHourCents), C.centsToPlain(s.totals.kitchen), C.centsToPlain(s.totals.leftover), C.formatHours(s.totals.dayHours), C.formatHours(s.totals.nightHours)]);
+		lines.push([]);
+		lines.push([t('perDayStaffTitle')]);
+		lines.push([t('date'), t('server'), t('colDayHours'), t('colDayTips'), t('colNightHours'), t('colNightTips'), t('colHours'), t('colTips')]);
+		s.days.forEach(function (d) {
+			d.staff.forEach(function (x) {
+				lines.push([d.date, x.name || t('unknownServer'), C.formatHours(x.dayHours), C.centsToPlain(x.dayTips),
+					C.formatHours(x.nightHours), C.centsToPlain(x.nightTips), C.formatHours(x.hours), C.centsToPlain(x.tips)]);
+			});
+		});
 		downloadCsvFile('tips_' + s.from + '_' + s.to + '.csv', lines);
 	}
 

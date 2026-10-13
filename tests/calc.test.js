@@ -198,6 +198,49 @@ test('per-server daily breakdown matches the per-person totals', () => {
 	}
 });
 
+test('per-day staff list: who worked, their hours and tips, in name order', () => {
+	const s = C.summarize({
+		serverPct: 60,
+		servers,
+		days: [
+			{ date: '2026-10-01', dayTips: 50000, totalTips: 150000 },
+			{ date: '2026-10-02', dayTips: 10000, totalTips: null },
+			{ date: '2026-10-03', dayTips: 0, totalTips: 0 },
+		],
+		hours: [
+			// Entered out of order on purpose: the list still comes out Alice, Bob, Chris.
+			h('2026-10-01', 'c', 'night', 200),
+			h('2026-10-01', 'a', 'day', 600), h('2026-10-01', 'a', 'night', 500),
+			h('2026-10-01', 'b', 'day', 400), h('2026-10-01', 'b', 'night', 500),
+			h('2026-10-02', 'b', 'day', 300), h('2026-10-02', 'c', 'night', 400),
+			h('2026-10-02', 'gone', 'day', 100),
+		],
+	}, '2026-10-01', '2026-10-31');
+	const [d1, d2, d3] = s.days;
+	// README example: day $300 → Alice 6h $180, Bob 4h $120; night $600 → 5h $250, 5h $250, 2h $100.
+	assert.deepEqual(d1.staff.map((x) => [x.id, x.name, x.dayHours, x.dayTips, x.nightHours, x.nightTips, x.hours, x.tips]), [
+		['a', 'Alice', 600, 18000, 500, 25000, 1100, 43000],
+		['b', 'Bob', 400, 12000, 500, 25000, 900, 37000],
+		['c', 'Chris', 0, 0, 200, 10000, 200, 10000],
+	]);
+	assert.equal(d1.staff[0].perHourCents, Math.round(43000 * 100 / 1100));
+	// A removed server comes last with no name; night tips are $0 while the total is missing.
+	assert.deepEqual(d2.staff.map((x) => [x.id, x.name, x.tips, x.nightHours]), [
+		['b', 'Bob', 4500, 0], ['c', 'Chris', 0, 400], ['gone', null, 1500, 0],
+	]);
+	assert.deepEqual(d3.staff, []);
+	// Matches the per-person view and what servers were paid that day.
+	for (const d of s.days) {
+		assert.equal(d.staff.reduce((a, x) => a + x.tips, 0), d.paid, d.date + ' paid');
+		assert.equal(d.staff.reduce((a, x) => a + x.hours, 0), d.dayHours + d.nightHours);
+		for (const x of d.staff) {
+			const sd = s.serverDays[x.id].find((y) => y.date === d.date);
+			assert.equal(sd.tips, x.tips);
+			assert.equal(sd.hours, x.hours);
+		}
+	}
+});
+
 test('range filter is inclusive', () => {
 	const s = C.summarize({
 		serverPct: 60,
