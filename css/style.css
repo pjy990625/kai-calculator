@@ -274,7 +274,8 @@ button.link {
 }
 /* Tablets: one-column screens stay a comfortable width, centered (reports use the full width for their tables). */
 .narrow { max-width: 720px; margin-left: auto; margin-right: auto; width: 100%; }
-/* My hours: name + dropdown on one line, then period controls. */
+/* One server's view (Reports → name): back button, then name + dropdown on one line, then period controls. */
+.back-row { margin-bottom: 16px; }
 .field.inline { display: flex; align-items: center; gap: 12px; }
 .field.inline > span { flex: none; font-size: .95rem; color: var(--text); }
 .field.inline > select { flex: 1 1 auto; min-width: 0; }
@@ -394,7 +395,7 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 /* Phone */
 
 @media (max-width: 640px) {
-	/* All four tabs fit on a 360px phone, in English too. */
+	/* All tabs fit on a 360px phone, in English too. */
 	.tabs { gap: 0; }
 	.tab { padding: 10px 9px; }
 	.cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -407,6 +408,12 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.entry-grid small .part { display: block; }
 	.entry-grid small .sep { display: none; }
 	.report-head h2 { font-size: 1.2rem; }
+	/* Period switch and ‹ range › each get their own full line: switch buttons
+	   share the width (never breaking "Bi-weekly"), the range sits in the middle (instead of wrapping to the right). */
+	.range-bar { flex-direction: column; align-items: stretch; }
+	.range-bar .segmented { display: flex; }
+	.range-bar .segmented button { flex: 1 1 auto; padding-left: 8px; padding-right: 8px; white-space: nowrap; }
+	.range-bar .row.nav, .range-bar .row.date-nav { justify-content: center; }
 }
 
 /* Phone held sideways: little height, so the header scrolls away instead of staying on top. */
@@ -438,7 +445,7 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.segmented button { min-height: 40px; }
 }
 
-/* Very narrow phones: all four tabs still fit (after the 640px rules it overrides). */
+/* Very narrow phones: all tabs still fit (after the 640px rules it overrides). */
 @media (max-width: 359px) {
 	.tab { padding: 10px 4px; font-size: .85rem; min-width: 44px; }
 }
