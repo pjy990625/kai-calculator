@@ -240,7 +240,7 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
    when the tips column fills in while hours are typed. */
 .entry-grid { table-layout: fixed; }
 .entry-grid .col-hours { width: 96px; }
-.entry-grid .col-share { width: 11.5rem; }
+.entry-grid .col-share { width: 8rem; }
 .entry-grid thead th { white-space: normal; }
 .entry-grid .name { overflow-wrap: anywhere; }
 .entry-grid .hours-cell input { text-align: right; }
@@ -335,7 +335,6 @@ button.link {
 .card.login { max-width: 380px; margin: 32px auto 0; display: grid; gap: 4px; }
 .card.login input { font-size: 1.3rem; letter-spacing: .2em; text-align: center; }
 .btn.block { width: 100%; }
-.block { display: block; }
 
 /* Daily entry */
 
@@ -346,9 +345,9 @@ button.link {
 .date-step { display: flex; gap: 4px; align-items: center; flex: 0 1 auto; min-width: 0; }
 .row.date-nav .btn { flex: none; }
 .date-step > .date-input { flex: 0 1 auto; width: auto; min-width: 0; }
-/* Day tips / Night tips tabs inside the card. */
+/* Day tips / Night tips / Summary tabs inside the card. */
 .shift-tabs {
-	display: grid; grid-template-columns: 1fr 1fr; gap: 2px;
+	display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px;
 	margin: 8px 0 12px; padding: 3px;
 	background: var(--surface-2);
 	border: 1px solid var(--line);
@@ -390,8 +389,6 @@ button.link {
 .save-bar.blocked, .save-bar.failed { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
 .save-bar .btn { flex: none; margin-left: auto; }
 .notice.lock { background: var(--surface-2); border: 1px solid var(--line); }
-.entry-grid small { font-weight: 400; font-size: .75rem; }
-.entry-grid small .part { white-space: nowrap; }
 input:disabled { opacity: .65; background: var(--surface-2); }
 .badge.admin { background: var(--night-soft); color: var(--night); }
 .card.form > .btn { margin-top: 4px; }
@@ -426,9 +423,6 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.server-row .row.tight { grid-column: 1 / -1; }
 	.entry-grid .col-hours { width: 90px; } /* room for "12.75" next to the saved ✓ */
 	.entry-grid .col-share { width: 7rem; }
-	/* "Day $71.00" and "Night $10.00" on two lines instead of a line broken at the dot. */
-	.entry-grid small .part { display: block; }
-	.entry-grid small .sep { display: none; }
 	.report-head h2 { font-size: 1.2rem; }
 	/* The period switch takes the full width (easier to tap); ‹ range › centers below it. */
 	.range-bar > .segmented { display: flex; flex: 1 1 100%; margin-right: 0; }
