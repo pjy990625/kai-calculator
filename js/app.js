@@ -21,6 +21,7 @@
 		role: null,
 		today: null,
 		retentionStart: null,
+		staffEditFrom: null, // oldest date staff can change (the database decides; 7 days)
 		settings: null,
 		servers: [],
 		tab: 'entry',
@@ -327,6 +328,7 @@
 		S.role = b.role;
 		S.today = b.today;
 		S.retentionStart = b.retention_start;
+		S.staffEditFrom = b.staff_edit_from || b.today; // older database: today only
 		S.settings = b.settings;
 		S.servers = C.sortServers(b.servers || []); // always alphabetical
 		setTimeout(flushErrors, 0); // signed in and online: send errors saved earlier
@@ -507,6 +509,7 @@
 		}
 		S.today = range.today;
 		S.retentionStart = range.retention_start;
+		S.staffEditFrom = range.staff_edit_from || range.today;
 		setMain(draw(range));
 	}
 
@@ -609,8 +612,8 @@
 			return t('lockTooOld', { months: S.settings.retention_months });
 		}
 		// Saved records: the database says. New records follow the same rule —
-		// staff today and yesterday, the admin any time.
-		const editable = rec ? rec.editable : (isAdmin() || date >= C.addDays(S.today, -1));
+		// staff for 7 days (S.staffEditFrom), the admin any time.
+		const editable = rec ? rec.editable : (isAdmin() || date >= S.staffEditFrom);
 		return editable ? null : t('lockClosed');
 	}
 
@@ -1106,7 +1109,7 @@
 
 		let dateInput = null;
 		// Changes save themselves, so the only action is Delete (once there is a record).
-		// Staff can change yesterday, but deleting a past day stays with the admin.
+		// Staff can change the last 7 days, but deleting a past day stays with the admin.
 		const actionsRow = isAdmin() || date === S.today ? el('div', { class: 'row actions', hidden: !rec }, [
 			el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')),
 		]) : el('div', { hidden: true });

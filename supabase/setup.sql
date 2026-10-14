@@ -300,11 +300,22 @@ begin
 end;
 $$;
 
+-- The oldest date staff can still add or change: a day stays open to staff for
+-- one week, counting the day itself (Monday's tips until Sunday 11:59 PM).
+-- On a busy night the tips are often worked out the next day or later.
+create or replace function private.staff_edit_from()
+returns date
+language sql
+stable
+set search_path = ''
+as $$
+	select private.today() - 6;
+$$;
+
 -- Can this role add or change the record of p_date right now?
--- Staff: today and yesterday (on a busy night the tips are often worked out
--- the next day). Older days are closed and only the admin can change them.
--- A past day also needs the name of the person changing it (see save_shifts),
--- which the app asks for when "Edit" is tapped on a past date.
+-- Staff: the last 7 days (see staff_edit_from). Older days are closed and only
+-- the admin can change them. A past day also needs the name of the person
+-- changing it (see save_shifts), which the app asks for when "Edit" is tapped.
 drop function if exists private.can_edit(text, date, timestamptz); -- older signature
 create or replace function private.can_edit(p_role text, p_date date)
 returns boolean
@@ -315,7 +326,7 @@ as $$
 	select case
 		when p_date is null or p_date < private.retention_start() or p_date > private.today() then false
 		when p_role = 'admin' then true
-		else p_date >= private.today() - 1
+		else p_date >= private.staff_edit_from()
 	end;
 $$;
 
@@ -443,6 +454,7 @@ begin
 		'role', v_role,
 		'today', private.today(),
 		'retention_start', private.retention_start(),
+		'staff_edit_from', private.staff_edit_from(),
 		'settings', json_build_object(
 			'restaurant_name', v_cfg.restaurant_name,
 			'server_pct', v_cfg.server_pct,
@@ -476,6 +488,7 @@ begin
 		'today', private.today(),
 		'now', now(),
 		'retention_start', private.retention_start(),
+		'staff_edit_from', private.staff_edit_from(),
 		'days', coalesce((
 			select json_agg(json_build_object(
 				'date', d.date,
