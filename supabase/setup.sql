@@ -300,9 +300,22 @@ begin
 end;
 $$;
 
+-- The oldest date staff can still add or change: a day stays open to staff for
+-- one week, counting the day itself (Monday's tips until Sunday 11:59 PM).
+-- On a busy night the tips are often worked out the next day or later.
+create or replace function private.staff_edit_from()
+returns date
+language sql
+stable
+set search_path = ''
+as $$
+	select private.today() - 6;
+$$;
+
 -- Can this role add or change the record of p_date right now?
--- Staff: only on that date itself, i.e. until 11:59 PM restaurant time.
--- From midnight on, the day is closed and only the admin can change it.
+-- Staff: the last 7 days (see staff_edit_from). Older days are closed and only
+-- the admin can change them. A past day also needs the name of the person
+-- changing it (see save_shifts), which the app asks for when "Edit" is tapped.
 drop function if exists private.can_edit(text, date, timestamptz); -- older signature
 create or replace function private.can_edit(p_role text, p_date date)
 returns boolean
@@ -313,7 +326,7 @@ as $$
 	select case
 		when p_date is null or p_date < private.retention_start() or p_date > private.today() then false
 		when p_role = 'admin' then true
-		else p_date = private.today()
+		else p_date >= private.staff_edit_from()
 	end;
 $$;
 
@@ -441,6 +454,7 @@ begin
 		'role', v_role,
 		'today', private.today(),
 		'retention_start', private.retention_start(),
+		'staff_edit_from', private.staff_edit_from(),
 		'settings', json_build_object(
 			'restaurant_name', v_cfg.restaurant_name,
 			'server_pct', v_cfg.server_pct,
@@ -474,6 +488,7 @@ begin
 		'today', private.today(),
 		'now', now(),
 		'retention_start', private.retention_start(),
+		'staff_edit_from', private.staff_edit_from(),
 		'days', coalesce((
 			select json_agg(json_build_object(
 				'date', d.date,
@@ -506,13 +521,17 @@ $$;
 --   hours: [{"server_id": "...", "hundredths": 550}, ...]
 --
 -- Night tips are never stored: night tips = whole-day total − day tips.
+--   p_editor      who is changing a past day (a server id). Staff must give it for
+--                 any date before today; it goes into the audit log.
+drop function if exists public.save_shifts(text, date, bigint, jsonb, bigint, jsonb); -- older signature
 create or replace function public.save_shifts(
 	p_token text,
 	p_date date,
 	p_day_tips_cents bigint,
 	p_day_hours jsonb,
 	p_total_tips_cents bigint,
-	p_night_hours jsonb
+	p_night_hours jsonb,
+	p_editor uuid default null
 )
 returns json
 language plpgsql
@@ -526,6 +545,10 @@ declare
 	v_set_night boolean := p_night_hours is not null;
 	v_day bigint;
 	v_total bigint;
+	v_editor text;
+	v_past boolean := p_date < private.today();
+	v_before_day jsonb;
+	v_before_night jsonb;
 begin
 	if p_date is null then
 		perform private.fail('invalid_date');
@@ -543,6 +566,12 @@ begin
 	select d.* into v_existing from private.days d where d.date = p_date for update;
 	if not private.can_edit(v_role, p_date) then
 		perform private.fail(case when v_existing.date is null then 'date_locked' else 'locked' end);
+	end if;
+	if p_editor is not null then
+		select s.name into v_editor from private.servers s where s.id = p_editor;
+	end if;
+	if v_past and v_role <> 'admin' and v_editor is null then
+		perform private.fail('editor_required'); -- "Edit" was not tapped (or an old version of the page)
 	end if;
 
 	-- The shift that is not being saved keeps what is stored.
@@ -572,6 +601,12 @@ begin
 		perform private.fail('invalid_tips'); -- whole-day total below day tips
 	end;
 
+	-- The hours as they were, for the audit log.
+	select jsonb_agg(jsonb_build_object('server_id', h.server_id, 'hundredths', h.hundredths) order by h.server_id) filter (where h.shift = 'day'),
+		jsonb_agg(jsonb_build_object('server_id', h.server_id, 'hundredths', h.hundredths) order by h.server_id) filter (where h.shift = 'night')
+	into v_before_day, v_before_night
+	from private.hours h where h.date = p_date;
+
 	if v_set_day then
 		delete from private.hours h where h.date = p_date and h.shift = 'day';
 		insert into private.hours (date, server_id, shift, hundredths)
@@ -587,8 +622,11 @@ begin
 
 	perform private.log(v_role, case when v_existing.date is null then 'create_day' else 'update_day' end, jsonb_build_object(
 		'date', p_date,
+		'past_day', v_past,
+		'editor', case when v_editor is null then null else jsonb_build_object('id', p_editor, 'name', v_editor) end,
 		'before', case when v_existing.date is null then null else jsonb_build_object(
-			'day_tips_cents', v_existing.day_tips_cents, 'total_tips_cents', v_existing.total_tips_cents) end,
+			'day_tips_cents', v_existing.day_tips_cents, 'total_tips_cents', v_existing.total_tips_cents,
+			'day_hours', coalesce(v_before_day, '[]'::jsonb), 'night_hours', coalesce(v_before_night, '[]'::jsonb)) end,
 		'after', jsonb_build_object('day_tips_cents', v_day, 'total_tips_cents', v_total,
 			'day_hours', p_day_hours, 'night_hours', p_night_hours)
 	));
@@ -645,7 +683,8 @@ begin
 	if v_existing.date is null then
 		perform private.fail('not_found');
 	end if;
-	if not private.can_edit(v_role, p_date) then
+	-- Staff can change yesterday, but deleting a past day stays with the admin.
+	if not private.can_edit(v_role, p_date) or (v_role <> 'admin' and p_date <> private.today()) then
 		perform private.fail('locked');
 	end if;
 	delete from private.days d where d.date = p_date;

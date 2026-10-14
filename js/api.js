@@ -15,6 +15,7 @@
 		'not_authenticated', 'admin_only', 'invalid_date', 'future_date', 'too_old', 'locked', 'date_locked',
 		'invalid_tips', 'invalid_hours', 'unknown_server', 'not_found', 'invalid_name', 'duplicate_name',
 		'server_has_hours', 'invalid_settings', 'invalid_password', 'password_conflict', 'invalid_range',
+		'editor_required',
 	];
 
 	class ApiError extends Error {

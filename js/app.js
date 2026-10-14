@@ -21,12 +21,14 @@
 		role: null,
 		today: null,
 		retentionStart: null,
+		staffEditFrom: null, // oldest date staff can change (the database decides; 7 days)
 		settings: null,
 		servers: [],
 		tab: 'entry',
 		entryDate: null,
 		entryShift: 'day', // which tab of the daily entry card is open: 'day' | 'night' | 'sum'
 		entryShiftDate: null, // the date entryShift was chosen for
+		unlock: null, // { date, editorId, name }: a past date opened with "Edit" (see renderDayForm)
 		reportKind: 'period', // 'period' | 'month'
 		reportDate: null,
 		personId: null, // set: Reports shows this server's hours day by day
@@ -326,6 +328,7 @@
 		S.role = b.role;
 		S.today = b.today;
 		S.retentionStart = b.retention_start;
+		S.staffEditFrom = b.staff_edit_from || b.today; // older database: today only
 		S.settings = b.settings;
 		S.servers = C.sortServers(b.servers || []); // always alphabetical
 		setTimeout(flushErrors, 0); // signed in and online: send errors saved earlier
@@ -506,6 +509,7 @@
 		}
 		S.today = range.today;
 		S.retentionStart = range.retention_start;
+		S.staffEditFrom = range.staff_edit_from || range.today;
 		setMain(draw(range));
 	}
 
@@ -608,9 +612,45 @@
 			return t('lockTooOld', { months: S.settings.retention_months });
 		}
 		// Saved records: the database says. New records follow the same rule —
-		// staff only on that date itself (until 11:59 PM), the admin any time.
-		const editable = rec ? rec.editable : (isAdmin() || date === S.today);
+		// staff for 7 days (S.staffEditFrom), the admin any time.
+		const editable = rec ? rec.editable : (isAdmin() || date >= S.staffEditFrom);
 		return editable ? null : t('lockClosed');
+	}
+
+	/**
+	 * A past day, read-only: pick who is changing it (staff share one PIN, so the
+	 * audit log needs a name), confirm, and the form opens for editing.
+	 */
+	function unlockBox(date) {
+		const admin = isAdmin();
+		const who = admin ? null : el('select', { 'aria-label': t('whoEdits') }, [el('option', { value: '', text: t('pickName') })]
+			.concat(S.servers.filter(function (s) { return s.active; }).map(function (s) {
+				return el('option', { value: s.id, text: s.name });
+			})));
+		const error = el('p', { class: 'unlock-error', role: 'alert', hidden: true });
+		function onEdit() {
+			const id = who ? who.value : '';
+			if (who && !id) {
+				error.textContent = t('pickNameFirst');
+				error.hidden = false;
+				who.focus();
+				return;
+			}
+			if (!window.confirm(t('confirmEditPast', { date: niceDate(date, true) }))) {
+				return;
+			}
+			const server = S.servers.find(function (s) { return s.id === id; });
+			S.unlock = { date: date, editorId: id || null, name: server ? server.name : t('roleAdmin') };
+			render();
+		}
+		return el('div', { class: 'notice lock unlock-box' }, [
+			el('p', { text: '🔒 ' + t(admin ? 'pastLockedAdmin' : 'pastLocked') }),
+			el('div', { class: 'row tight' }, [
+				who,
+				el('button', { type: 'button', class: 'btn primary small', onclick: onEdit }, t('editPast')),
+			]),
+			error,
+		]);
 	}
 
 	function renderEntryTab(seq) {
@@ -624,6 +664,14 @@
 
 	function renderDayForm(date, rec, input) {
 		const locked = lockReason(date, rec);
+		// A past day opens read-only so it can't be changed by a stray tap. "Edit" (with the
+		// name of who is changing it, for the audit log) opens it until another date is picked.
+		if (S.unlock && S.unlock.date !== date) {
+			S.unlock = null;
+		}
+		const unlock = S.unlock;
+		const guarded = !locked && date < S.today && !unlock;
+		const readOnly = !!locked || guarded;
 		const pct = S.settings.server_pct;
 		const myHours = input.hours.filter(function (h) { return h.date === date; });
 		function savedHours(serverId, shift) {
@@ -664,15 +712,15 @@
 
 		const dayTipsInput = el('input', {
 			id: 'day-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0.00',
-			value: rec ? C.centsToInput(rec.dayTips) : '', disabled: !!locked, oninput: onInput('day'),
+			value: rec ? C.centsToInput(rec.dayTips) : '', disabled: readOnly, oninput: onInput('day'),
 		});
 		const totalInput = el('input', {
 			id: 'total-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0.00',
-			value: rec && rec.totalTips !== null ? C.centsToInput(rec.totalTips) : '', disabled: !!locked, oninput: onInput('night'),
+			value: rec && rec.totalTips !== null ? C.centsToInput(rec.totalTips) : '', disabled: readOnly, oninput: onInput('night'),
 		});
 		const nightOut = el('output', { id: 'night-tips', class: 'computed' }, '—');
 		// Shown on a saved day for as long as the whole-day total is still empty.
-		const totalHint = rec && !locked ? el('p', { class: 'notice warn', text: t('totalMissingHint') }) : null;
+		const totalHint = rec && !readOnly ? el('p', { class: 'notice warn', text: t('totalMissingHint') }) : null;
 
 		const inputs = { day: {}, night: {} };     // inputs[shift][serverId] → hours field
 		const shareCells = { day: {}, night: {} }; // shareCells[shift][serverId] → tips cell
@@ -703,7 +751,7 @@
 					inputs[shift][s.id] = el('input', {
 						type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0',
 						'aria-label': s.name + ' ' + t(shift) + ' ' + t('hours'),
-						value: savedHours(s.id, shift), disabled: !!locked, oninput: onInput(shift),
+						value: savedHours(s.id, shift), disabled: readOnly, oninput: onInput(shift),
 					});
 					shareCells[shift][s.id] = el('td', { class: 'num share' }, '—');
 					return el('tr', null, [
@@ -920,6 +968,8 @@
 				p_day_hours: sent.day ? f.hours.day : null,
 				p_total_tips_cents: sent.night ? f.totalTips : null,
 				p_night_hours: sent.night ? f.hours.night : null,
+				// Only for a past day (older databases don't know this argument).
+				p_editor: unlock && unlock.editorId ? unlock.editorId : undefined,
 			}, { keepalive: !!keepalive }).then(function () {
 				actionsRow.hidden = false; // the record exists now: it can be deleted
 				sentEdits.forEach(function (n, field) {
@@ -946,11 +996,11 @@
 		}
 
 		function onSaveError(e) {
-			if (e && ('locked' === e.code || 'date_locked' === e.code)) {
-				// Midnight passed (staff): the day is closed and can't be saved any more.
+			if (e && ('locked' === e.code || 'date_locked' === e.code || 'editor_required' === e.code)) {
+				// Midnight passed (staff): the day is closed, or now needs "Edit" first.
 				clearDirty();
 				again = false;
-				toast(t('err_locked'), 'error');
+				toast(t('editor_required' === e.code ? 'err_editor_required' : 'err_locked'), 'error');
 				if (alive) {
 					refreshBootstrap().catch(function () {}).then(render);
 				}
@@ -1059,11 +1109,26 @@
 
 		let dateInput = null;
 		// Changes save themselves, so the only action is Delete (once there is a record).
-		const actionsRow = el('div', { class: 'row actions', hidden: !rec }, [
+		// Staff can change the last 7 days, but deleting a past day stays with the admin.
+		const actionsRow = isAdmin() || date === S.today ? el('div', { class: 'row actions', hidden: !rec }, [
 			el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')),
-		]);
+		]) : el('div', { hidden: true });
 
-		const status = locked ? el('p', { class: 'notice lock', text: '🔒 ' + locked }) : null;
+		let status = locked ? el('p', { class: 'notice lock', text: '🔒 ' + locked }) : null;
+		if (guarded) {
+			status = unlockBox(date);
+		} else if (unlock) {
+			status = el('div', { class: 'notice edit-on row' }, [
+				el('span', { text: '✏ ' + t('editingPast', { name: unlock.name }) }),
+				el('button', { type: 'button', class: 'btn small', onclick: function () {
+					// Save what was typed, then lock the day again.
+					const r = leave();
+					if (r !== false) {
+						Promise.resolve(r).then(function () { S.unlock = null; render(); });
+					}
+				} }, t('editDone')),
+			]);
+		}
 
 		// The two tabs. Both panels stay in the page (one hidden), so switching
 		// tabs never throws away what was typed.
@@ -1112,13 +1177,13 @@
 		const form = el('form', { class: 'card narrow', onsubmit: onSubmit, novalidate: true }, [
 			picker.node,
 			status,
-			locked ? null : statusBar,
+			readOnly ? null : statusBar,
 			el('div', { class: 'shift-tabs', role: 'tablist', 'aria-label': t('entryTitle') }, [tabButtons.day, tabButtons.night, tabButtons.sum]),
 			panels.day,
 			panels.night,
 			panels.sum,
 			hoursHelp,
-			locked ? null : actionsRow,
+			readOnly ? null : actionsRow,
 		]);
 		// Leaving a field saves it right away (no need to wait 1.5 s).
 		form.addEventListener('focusout', function () {
@@ -1126,7 +1191,7 @@
 				saveNow();
 			}
 		});
-		entryForm = locked ? null : {
+		entryForm = readOnly ? null : {
 			flush: saveNow,
 			leave: leave,
 			date: date,
@@ -1859,7 +1924,7 @@
 			const before = S.today;
 			refreshBootstrap().then(function () {
 				if (S.today !== before && !isAdmin() && 'entry' === S.tab) {
-					render(); // a new day started: yesterday's record is now locked for staff
+					render(); // a new day started: what was today is now a past day (locked until "Edit")
 				}
 			}).catch(function (e) {
 				if (e && e.code === 'not_authenticated') {
