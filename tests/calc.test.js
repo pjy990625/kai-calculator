@@ -46,7 +46,14 @@ test('parseHours / formatHours', () => {
 	assert.equal(C.parseHours('5'), 500);
 	assert.equal(C.parseHours('5.5'), 550);
 	assert.equal(C.parseHours('5:30'), 550);
-	assert.equal(C.parseHours('5:20'), 533);
+	assert.equal(C.parseHours('5.25'), 525);
+	assert.equal(C.parseHours('5.75'), 575);
+	assert.equal(C.parseHours('.5'), 50);
+	assert.equal(C.parseHours('5:45'), 575);
+	// Only quarter hours: anything else is a typo.
+	assert.equal(C.parseHours('5.3'), null);
+	assert.equal(C.parseHours('5.33'), null);
+	assert.equal(C.parseHours('5:20'), null);
 	assert.equal(C.parseHours('25'), null);
 	assert.equal(C.parseHours('5:75'), null);
 	assert.equal(C.formatHours(550), '5.5');

@@ -15,7 +15,6 @@
 	const API = window.KaiApi;
 	const TOKEN_KEY = 'kai-calculator:token';
 	const LANG_KEY = 'kai-calculator:lang';
-	const OLD_ME_KEY = 'kai-calculator:me'; // saved by the old "My hours" tab; removed on start
 
 	const S = {
 		token: null,
@@ -26,13 +25,11 @@
 		servers: [],
 		tab: 'entry',
 		entryDate: null,
-		entryShift: 'day', // which tab of the daily entry card is open: 'day' | 'night'
+		entryShift: 'day', // which tab of the daily entry card is open: 'day' | 'night' | 'sum'
 		entryShiftDate: null, // the date entryShift was chosen for
-		reportKind: 'period', // 'day' | 'period' | 'month'
+		reportKind: 'period', // 'period' | 'month'
 		reportDate: null,
-		personId: null, // Reports → one server's hours day by day
-		personKind: 'period', // 'period' | 'month'
-		personDate: null,
+		personId: null, // set: Reports shows this server's hours day by day
 	};
 	let lang = 'en';
 	let renderSeq = 0;
@@ -335,15 +332,11 @@
 		if (!S.reportDate) {
 			S.reportDate = S.today;
 		}
-		if (!S.personDate) {
-			S.personDate = S.today;
-		}
 	}
 
 	async function boot() {
 		lang = lsGet(LANG_KEY) || I.detect();
 		document.documentElement.lang = lang;
-		lsRemove(OLD_ME_KEY);
 		if (!API.configured()) {
 			renderSetupNeeded();
 			return;
@@ -404,6 +397,14 @@
 		return svg;
 	}
 
+	/** The entry save bar sticks right under the header, whose height varies (notch, font size). */
+	function syncTopbarHeight() {
+		const bar = document.querySelector('.topbar');
+		const h = bar && 'sticky' === window.getComputedStyle(bar).position ? bar.offsetHeight : 0;
+		document.documentElement.style.setProperty('--topbar-h', h + 'px');
+	}
+	window.addEventListener('resize', syncTopbarHeight);
+
 	function renderShell() {
 		const name = S.settings && S.settings.restaurant_name;
 		document.title = (name ? name + ' · ' : '') + t('appTitle');
@@ -437,8 +438,7 @@
 			['report', t('tabReport')],
 			['staff', t('tabStaff')],
 		].map(function (tb) {
-			// One server's day-by-day view is part of Reports.
-			const on = S.tab === tb[0] || ('person' === S.tab && 'report' === tb[0]);
+			const on = S.tab === tb[0];
 			return el('button', {
 				type: 'button',
 				role: 'tab',
@@ -446,10 +446,12 @@
 				'aria-selected': on ? 'true' : 'false',
 				onclick: function () {
 					S.tab = tb[0];
+					S.personId = null; // a tab always opens on its main view
 					render();
 				},
 			}, tb[1]);
 		}));
+		syncTopbarHeight();
 	}
 
 	function render() {
@@ -475,8 +477,6 @@
 		const seq = ++renderSeq;
 		if ('report' === S.tab) {
 			renderReportTab(seq);
-		} else if ('person' === S.tab) {
-			renderPersonView(seq);
 		} else if ('staff' === S.tab) {
 			setMain(renderStaffTab());
 		} else if ('settings' === S.tab) {
@@ -577,7 +577,7 @@
 				S.tab = 'entry';
 				S.entryDate = null;
 				S.reportDate = null;
-				S.personDate = null;
+				S.personId = null;
 				boot();
 			});
 		}
@@ -641,11 +641,22 @@
 			dirty.night = false;
 		}
 		function onInput(shift) {
-			return function () {
+			return function (e) {
 				dirty[shift] = true;
+				edits.set(e.target, (edits.get(e.target) || 0) + 1);
+				markField(e.target, 'pending');
 				update();
 				scheduleSave();
 			};
+		}
+
+		// Each field shows its own state: amber border = typed, not saved yet;
+		// green border + ✓ = saved. `edits` counts typing per field so a field
+		// changed again while a save is on its way is not marked saved too early.
+		const edits = new Map();
+		function markField(field, state) {
+			field.classList.toggle('is-pending', 'pending' === state);
+			field.classList.toggle('is-saved', 'saved' === state);
 		}
 
 		const dayTipsInput = el('input', {
@@ -750,31 +761,46 @@
 			foot.day.share.textContent = dayOk ? money(d.paid) : '—';
 			leftoverOut.day.textContent = dayOk && d.leftover > 0 ? t('leftoverLine', { amount: money(d.leftover) }) : '';
 
-			// ☾ tab: each server's tips for the WHOLE day (day + night).
+			// ☾ tab: each server's tips for the night shift (the whole day is in the Summary tab).
 			nightOut.textContent = nightOk && night !== null ? money(night) : '—';
 			if (totalHint) {
 				totalHint.hidden = totalInput.value.trim() !== '';
 			}
 			servers.forEach(function (s) {
-				const a = d.shares[s.id] || 0;
 				const b = n.shares[s.id] || 0;
-				const cell = shareCells.night[s.id];
-				if (!nightOk || !(a + b)) {
-					cell.replaceChildren('—');
-					return;
-				}
-				cell.replaceChildren(el('strong', { text: money(a + b) }));
-				if (a) {
-					cell.appendChild(el('small', { class: 'muted block' }, [
-						el('span', { class: 'part', text: t('day') + ' ' + money(a) }),
-						el('span', { class: 'sep', text: ' · ' }),
-						el('span', { class: 'part', text: t('night') + ' ' + money(b) }),
-					]));
-				}
+				shareCells.night[s.id].replaceChildren(nightOk && b ? el('strong', { text: money(b) }) : '—');
 			});
-			foot.night.share.textContent = nightOk ? money(d.paid + n.paid) : '—'; // what servers actually receive, like the report
-			const left = d.leftover + n.leftover;
-			leftoverOut.night.textContent = nightOk && left > 0 ? t('leftoverLine', { amount: money(left) }) : '';
+			foot.night.share.textContent = nightOk ? money(n.paid) : '—';
+			leftoverOut.night.textContent = nightOk && n.leftover > 0 ? t('leftoverLine', { amount: money(n.leftover) }) : '';
+
+			drawSummary(f, dayOk, nightOk);
+		}
+
+		/** Summary tab: the whole day as typed (saved or not), like the old daily report. */
+		const sumPanel = el('div', { id: 'shift-panel-sum', class: 'shift-panel', role: 'tabpanel', 'aria-labelledby': 'shift-tab-sum' });
+		function drawSummary(f, dayOk, nightOk) {
+			const hours = [];
+			C.SHIFTS.forEach(function (shift) {
+				f.hours[shift].forEach(function (h) {
+					hours.push({ date: date, serverId: h.server_id, shift: shift, hundredths: h.hundredths });
+				});
+			});
+			const s = C.summarize({
+				serverPct: pct,
+				servers: S.servers,
+				days: [{ date: date, dayTips: dayOk ? f.dayTips || 0 : 0, totalTips: nightOk ? f.totalTips : null }],
+				hours: hours,
+			}, date, date);
+			const tot = s.totals;
+			sumPanel.replaceChildren(
+				el('div', { class: 'cards' }, [
+					statCard(t('cardTotalTips'), money(tot.tips), ''),
+					statCard(t('cardServers', { pct: s.serverPct }), money(tot.pool), 'accent'),
+					statCard(t('cardKitchen', { pct: 100 - s.serverPct }), money(tot.kitchen), ''),
+					statCard(t('cardHours'), C.formatHours(tot.hours), ''),
+				]),
+				dailyTable(s)
+			);
 		}
 
 		function firstBadHours(shift) {
@@ -861,6 +887,7 @@
 			}
 			clearDirty();
 			setStatus('saving');
+			const sentEdits = new Map(edits);
 			inFlight = API.rpc('save_shifts', {
 				p_token: S.token,
 				p_date: date,
@@ -870,6 +897,12 @@
 				p_night_hours: sent.night ? f.hours.night : null,
 			}, { keepalive: !!keepalive }).then(function () {
 				actionsRow.hidden = false; // the record exists now: it can be deleted
+				sentEdits.forEach(function (n, field) {
+					if (edits.get(field) === n) {
+						edits.delete(field);
+						markField(field, 'saved');
+					}
+				});
 				if (!isDirty()) {
 					setStatus('saved');
 				}
@@ -909,11 +942,8 @@
 			}
 		}
 
-		/** One status line per tab, between the tips field and the table. */
-		const statusLines = {};
-		C.SHIFTS.forEach(function (shift) {
-			statusLines[shift] = el('p', { class: 'save-status', role: 'status' });
-		});
+		/** One save bar for both tabs; it stays in view under the header while scrolling. */
+		const statusBar = el('div', { class: 'save-bar', role: 'status' });
 		let statusKind = '';
 		function setStatus(kind, msg) {
 			if ('saving' === kind && 'saving' === statusKind) {
@@ -921,7 +951,11 @@
 			}
 			statusKind = kind;
 			let text = '';
-			if ('saving' === kind) {
+			if ('idle' === kind) {
+				text = t('autoIdle');
+			} else if ('stored' === kind) {
+				text = t('autoStored');
+			} else if ('saving' === kind) {
 				text = t('autoSaving');
 			} else if ('saved' === kind) {
 				text = t('autoSaved', { time: niceTime(new Date()) });
@@ -930,13 +964,10 @@
 			} else if ('failed' === kind) {
 				text = t('autoFailed', { reason: msg }) + ' ';
 			}
-			C.SHIFTS.forEach(function (shift) {
-				const line = statusLines[shift];
-				line.className = 'save-status ' + kind;
-				line.replaceChildren(text, 'failed' === kind
-					? el('button', { type: 'button', class: 'btn small', onclick: function () { saveNow(); } }, t('retry'))
-					: '');
-			});
+			statusBar.className = 'save-bar ' + kind;
+			statusBar.replaceChildren(el('span', { text: text }), 'failed' === kind
+				? el('button', { type: 'button', class: 'btn small', onclick: function () { saveNow(); } }, t('retry'))
+				: '');
 		}
 
 		/**
@@ -1017,7 +1048,6 @@
 				el('div', { class: 'tips-grid' }, [
 					el('label', { class: 'field' }, [el('span', { text: t('dayTips') }), dayTipsInput]),
 				]),
-				locked ? null : statusLines.day,
 				leftoverOut.day,
 				hoursTable('day', t('share')),
 			]),
@@ -1026,26 +1056,30 @@
 					el('label', { class: 'field' }, [el('span', { text: t('totalTips') }), totalInput]),
 					el('div', { class: 'field' }, [el('span', { text: t('nightTipsAuto') }), nightOut]),
 				]),
-				locked ? null : statusLines.night,
 				totalHint,
 				leftoverOut.night,
-				hoursTable('night', t('shareWholeDay')),
+				hoursTable('night', t('share')),
 			]),
+			sum: sumPanel,
 		};
+		const hoursHelp = el('p', { class: 'muted small', text: t('hoursHelp') });
 		function showShift(shift) {
 			S.entryShift = shift;
-			C.SHIFTS.forEach(function (k) {
+			TABS.forEach(function (k) {
 				const on = k === shift;
 				tabButtons[k].classList.toggle('is-on', on);
 				tabButtons[k].setAttribute('aria-selected', on ? 'true' : 'false');
 				panels[k].hidden = !on;
 			});
+			hoursHelp.hidden = 'sum' === shift;
 		}
-		C.SHIFTS.forEach(function (k) {
+		const TABS = ['day', 'night', 'sum'];
+		const tabLabels = { day: '☀ ' + t('dayTab'), night: '☾ ' + t('nightTab'), sum: t('summaryTab') };
+		TABS.forEach(function (k) {
 			tabButtons[k] = el('button', {
 				type: 'button', role: 'tab', id: 'shift-tab-' + k, class: 'shift-tab ' + k, 'aria-controls': 'shift-panel-' + k,
 				onclick: function () { showShift(k); },
-			}, 'day' === k ? '☀ ' + t('dayTips') : '☾ ' + t('nightTips'));
+			}, tabLabels[k]);
 		});
 
 		const picker = dayPicker(date, function (d) { S.entryDate = d; render(); });
@@ -1053,10 +1087,12 @@
 		const form = el('form', { class: 'card narrow', onsubmit: onSubmit, novalidate: true }, [
 			picker.node,
 			status,
-			el('div', { class: 'shift-tabs', role: 'tablist', 'aria-label': t('entryTitle') }, [tabButtons.day, tabButtons.night]),
+			locked ? null : statusBar,
+			el('div', { class: 'shift-tabs', role: 'tablist', 'aria-label': t('entryTitle') }, [tabButtons.day, tabButtons.night, tabButtons.sum]),
 			panels.day,
 			panels.night,
-			el('p', { class: 'muted small', text: t('hoursHelp') }),
+			panels.sum,
+			hoursHelp,
 			locked ? null : actionsRow,
 		]);
 		// Leaving a field saves it right away (no need to wait 1.5 s).
@@ -1071,25 +1107,26 @@
 			date: date,
 			unsaved: isDirty, // typed but not sendable
 		};
-		// Opening a date picks its tab: nothing saved → Day tips; day AND night
-		// saved → Night tips; only the day saved → the tab that was open. Redraws
+		// Opening a date picks its tab: nothing saved → Day tips; the whole day
+		// saved → Summary; only the day saved → the tab that was open. Redraws
 		// of the same date (e.g. coming back from another tab) keep the tab the user is on.
 		if (S.entryShiftDate !== date) {
 			S.entryShiftDate = date;
 			if (!rec) {
 				S.entryShift = 'day';
 			} else if (rec.totalTips !== null) {
-				S.entryShift = 'night';
+				S.entryShift = 'sum';
 			}
 		}
 		showShift(S.entryShift);
 		update();
+		setStatus(rec ? 'stored' : 'idle');
 		return form;
 	}
 
 	/**
-	 * ‹ calendar › for one day plus a Today button, shared by Daily entry and
-	 * Reports → Daily. Future dates cannot be picked.
+	 * ‹ calendar › for one day plus a Today button (Daily entry). Future dates
+	 * cannot be picked.
 	 */
 	function dayPicker(date, onPick) {
 		const input = el('input', {
@@ -1121,26 +1158,14 @@
 	/* Report tab                                                          */
 	/* ------------------------------------------------------------------ */
 
-	/** The day, pay period (1st–15th / 16th–end) or calendar month containing `date`. */
+	/** The pay period (1st–15th / 16th–end) or calendar month containing `date`. */
 	function rangeFor(kind, date) {
-		if ('day' === kind) {
-			return { from: date, to: date };
-		}
 		return 'month' === kind ? C.monthRange(C.monthKey(date)) : C.payPeriodFor(date);
 	}
 
-	/**
-	 * Period switch + ‹ range › navigation, shared by Reports and one server's view.
-	 * `withDay`: also offer Daily (Reports only), picked from a calendar.
-	 */
-	function rangeControls(kind, r, onKind, onDate, withDay) {
+	/** Period switch + ‹ range › navigation, shared by Reports and one server's view. */
+	function rangeControls(kind, r, onKind, onDate) {
 		const kinds = [{ value: 'period', label: t('reportPeriod') }, { value: 'month', label: t('reportMonth') }];
-		if (withDay) {
-			kinds.unshift({ value: 'day', label: t('reportDay') });
-		}
-		if ('day' === kind) {
-			return [segmented(kinds, kind, onKind), dayPicker(r.from, onDate).node];
-		}
 		const isMonth = 'month' === kind;
 		function move(n) {
 			onDate(isMonth ? C.shiftMonth(C.monthKey(r.from), n) + '-01' : C.shiftPayPeriod(r.from, n).from);
@@ -1156,16 +1181,22 @@
 	}
 
 	function renderReportTab(seq) {
+		if (S.personId) {
+			renderPersonView(seq);
+			return;
+		}
 		const r = rangeFor(S.reportKind, S.reportDate);
 		loadRange(seq, r.from, r.to, function (range) {
 			return renderReportBody(C.summarize(calcInput(range), r.from, r.to), r);
 		});
 	}
 
-	/** Reports → Daily for `date`. */
+	/** A date in Reports → that day's Summary tab in Daily entry. */
 	function openDay(date) {
-		S.reportKind = 'day';
-		S.reportDate = date;
+		S.tab = 'entry';
+		S.entryDate = date;
+		S.entryShift = 'sum';
+		S.entryShiftDate = date; // keep Summary (don't pick a tab for this date)
 		render();
 		window.scrollTo(0, 0);
 	}
@@ -1177,8 +1208,6 @@
 		let title = rangeLabel(s.from, s.to);
 		if ('month' === kind) {
 			title = monthLabel(s.from.slice(0, 7));
-		} else if ('day' === kind) {
-			title = niceDate(s.from, true) + ', ' + s.from.slice(0, 4);
 		}
 		const parts = [
 			// The on-screen period controls are not printed, so print gets its own heading.
@@ -1188,16 +1217,8 @@
 				'month' === kind ? el('p', { class: 'muted', text: rangeLabel(s.from, s.to) }) : null,
 			]),
 			el('div', { class: 'range-bar no-print' }, rangeControls(kind, r,
-				function (v) {
-					// Daily opens on today; the other views keep the date being looked at.
-					if ('day' === v && 'day' !== kind) {
-						S.reportDate = S.today;
-					}
-					S.reportKind = v;
-					render();
-				},
-				function (d) { S.reportDate = d; render(); },
-				true
+				function (v) { S.reportKind = v; render(); },
+				function (d) { S.reportDate = d; render(); }
 			)),
 			el('div', { class: 'cards' }, [
 				statCard(t('cardTotalTips'), money(tot.tips), ''),
@@ -1211,6 +1232,9 @@
 			parts.push(el('div', { class: 'notice warn', text: t('retentionNote', { months: S.settings.retention_months, date: niceDate(S.retentionStart) }) }));
 		}
 		s.warnings.forEach(function (w) {
+			if ('missingTotal' === w.type && w.date === S.today) {
+				return; // normal until closing: the table already shows "missing"
+			}
 			parts.push(el('div', {
 				class: 'notice warn',
 				text: 'missingTotal' === w.type
@@ -1219,29 +1243,14 @@
 			}));
 		});
 
-		if ('day' === kind) {
-			parts.push(el('h3', { class: 'section-title', text: t('perPersonTitle') }));
-			parts.push(dailyTable(s));
-		} else {
-			parts.push(el('h3', { class: 'section-title', text: t('perPersonTitle') }));
-			parts.push(s.rows.length ? personTable(s.rows, tot) : el('p', { class: 'muted', text: t('noData') }));
-			if (s.days.length) {
-				parts.push(el('h3', { class: 'section-title', text: t('perDayTitle') }));
-				parts.push(el('p', { class: 'muted small no-print', text: t('perDayHelp') }));
-				parts.push(dayTable(s));
-			}
+		parts.push(el('h3', { class: 'section-title', text: t('perPersonTitle') }));
+		parts.push(s.rows.length ? personTable(s.rows, tot) : el('p', { class: 'muted', text: t('noData') }));
+		if (s.days.length) {
+			parts.push(el('h3', { class: 'section-title', text: t('perDayTitle') }));
+			parts.push(el('p', { class: 'muted small no-print', text: t('perDayHelp') }));
+			parts.push(dayTable(s));
 		}
 		parts.push(el('div', { class: 'row actions no-print' }, [
-			'day' === kind ? el('button', {
-				type: 'button',
-				class: 'btn',
-				onclick: function () {
-					S.tab = 'entry';
-					S.entryDate = s.from;
-					render();
-					window.scrollTo(0, 0);
-				},
-			}, t('openInEntry')) : null,
 			el('button', { type: 'button', class: 'btn', onclick: function () { downloadCsv(s); } }, t('downloadCsv')),
 			el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
 		]));
@@ -1284,17 +1293,18 @@
 		]));
 	}
 
-	/** Reports → one server's hours day by day, for the same range. */
-	function openPerson(id) {
+	/** Reports → one server's hours day by day, for the same range (or the period containing `date`). */
+	function openPerson(id, date) {
+		S.tab = 'report';
+		if (date) {
+			S.reportDate = date;
+		}
 		S.personId = id;
-		S.personKind = 'day' === S.reportKind ? 'period' : S.reportKind; // no daily view here
-		S.personDate = S.reportDate;
-		S.tab = 'person';
 		render();
 		window.scrollTo(0, 0);
 	}
 
-	/** Per-day totals; tapping a date opens that day in Reports → Daily. */
+	/** Per-day totals; tapping a date opens that day's Summary in Daily entry. */
 	function dayTable(s) {
 		return el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
 			el('thead', null, el('tr', null, [
@@ -1329,8 +1339,8 @@
 	}
 
 	/**
-	 * Reports → Daily: one row per server who worked that day with day hours
-	 * and tips, night hours and tips, and their total for the day.
+	 * Daily entry → Summary: one row per server who worked that day with day
+	 * hours and tips, night hours and tips, and their total for the day.
 	 */
 	function dailyTable(s) {
 		const d = s.days[0]; // missing when nothing was entered that day
@@ -1370,7 +1380,7 @@
 						type: 'button',
 						class: 'link',
 						title: t('openPerson', { name: name }),
-						onclick: function () { openPerson(x.id); },
+						onclick: function () { openPerson(x.id, d.date); },
 					}, name) : name)].concat(cells('td', x)));
 				})),
 				el('tfoot', null, el('tr', null, [
@@ -1432,16 +1442,12 @@
 	}
 
 	/* ------------------------------------------------------------------ */
-	/* My hours tab — one server's hours and tips, day by day              */
+	/* Reports → one server's hours and tips, day by day                   */
 	/* ------------------------------------------------------------------ */
 
 	/** Back to Reports, on the range the server's view was showing. */
 	function backToReports() {
-		S.tab = 'report';
-		if ('day' !== S.reportKind) {
-			S.reportKind = S.personKind;
-			S.reportDate = S.personDate;
-		}
+		S.personId = null;
 		render();
 		window.scrollTo(0, 0);
 	}
@@ -1466,7 +1472,9 @@
 				.map(function (x) { return el('option', { value: x.id, selected: x.id === id }, x.name); })),
 		]);
 
-		const r = rangeFor(S.personKind, S.personDate);
+		// Uses the Reports range, so going back shows the same period.
+		const kind = S.reportKind;
+		const r = rangeFor(kind, S.reportDate);
 		loadRange(seq, r.from, r.to, function (range) {
 			const s = C.summarize(calcInput(range), r.from, r.to);
 			const row = s.rows.find(function (x) { return x.id === id; });
@@ -1483,9 +1491,9 @@
 			return el('section', { class: 'card person narrow' }, [
 				el('div', { class: 'row back-row' }, el('button', { type: 'button', class: 'btn ghost', onclick: backToReports }, t('backToReports'))),
 				picker,
-				el('div', { class: 'range-bar' }, rangeControls(S.personKind, r,
-					function (v) { S.personKind = v; render(); },
-					function (d) { S.personDate = d; render(); }
+				el('div', { class: 'range-bar' }, rangeControls(kind, r,
+					function (v) { S.reportKind = v; render(); },
+					function (d) { S.reportDate = d; render(); }
 				)),
 				el('div', { class: 'cards three' }, [
 					statCard(t('colHours'), C.formatHours(row ? row.hours : 0), 'accent'),
@@ -1595,7 +1603,8 @@
 						});
 					},
 				}),
-				el('span', { class: 'badge ' + (s.active ? 'on' : 'off'), text: s.active ? t('active') : t('inactive') }),
+				// Only inactive servers are marked; the empty span keeps the columns lined up.
+				s.active ? el('span') : el('span', { class: 'badge', text: t('inactive') }),
 				isAdmin() ? el('div', { class: 'row tight' }, [
 					el('button', {
 						type: 'button',

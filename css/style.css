@@ -17,6 +17,7 @@
 	--danger-soft: #fee2e2;
 	--warn-soft: #fff7ed;
 	--warn-line: #fdba74;
+	--check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3L13 4.5' fill='none' stroke='%230f766e' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 	--radius: 12px;
 	--radius-sm: 8px;
 	--shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 4px 16px rgba(0, 0, 0, .04);
@@ -41,6 +42,7 @@
 		--danger-soft: #3b1515;
 		--warn-soft: #33220f;
 		--warn-line: #9a5b1c;
+		--check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3L13 4.5' fill='none' stroke='%232dd4bf' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 		--shadow: none;
 	}
 }
@@ -52,8 +54,8 @@
 html {
 	-webkit-text-size-adjust: 100%;
 	/* A field focused near the top (keyboard opening) is not hidden under the sticky header
-	   (about 110px tall, plus the notch area in a home-screen app). */
-	scroll-padding-top: calc(120px + env(safe-area-inset-top));
+	   (--topbar-h, set by app.js; it includes the notch area) or the entry save bar under it. */
+	scroll-padding-top: calc(var(--topbar-h, 120px) + 64px);
 }
 /* No 300 ms double-tap-zoom wait on taps; no grey flash on iPhone. */
 button, input, select, summary { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
@@ -162,6 +164,13 @@ input:focus-visible, select:focus-visible, button:focus-visible {
 	outline: 2px solid var(--accent);
 	outline-offset: 1px;
 }
+/* Daily entry: typed but not saved yet (amber), saved (green + ✓), wrong (red, wins). */
+input.is-pending { border-color: var(--warn-line); background-color: var(--warn-soft); }
+input.is-saved {
+	border-color: var(--accent);
+	background: var(--check) no-repeat right 8px center / 16px, var(--accent-soft);
+	padding-right: 30px;
+}
 input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 
 
@@ -197,6 +206,7 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 	border: 0; background: none; color: var(--muted);
 	padding: 6px 14px; min-height: 34px;
 	border-radius: 6px;
+	white-space: nowrap; /* "Bi-weekly" never breaks */
 	cursor: pointer;
 }
 .segmented button.is-on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
@@ -230,10 +240,12 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
    when the tips column fills in while hours are typed. */
 .entry-grid { table-layout: fixed; }
 .entry-grid .col-hours { width: 96px; }
-.entry-grid .col-share { width: 11.5rem; }
+.entry-grid .col-share { width: 8rem; }
 .entry-grid thead th { white-space: normal; }
 .entry-grid .name { overflow-wrap: anywhere; }
 .entry-grid .hours-cell input { text-align: right; }
+/* Hours are right-aligned, so their ✓ goes on the left. */
+.entry-grid .hours-cell input.is-saved { background-position: left 5px center, 0 0; background-size: 13px, auto; padding-left: 20px; padding-right: 6px; }
 .entry-grid .share { font-weight: 700; }
 
 .tag {
@@ -280,11 +292,12 @@ button.link {
 .field.inline > span { flex: none; font-size: .95rem; color: var(--text); }
 .field.inline > select { flex: 1 1 auto; min-width: 0; }
 .range-bar {
-	display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+	display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
 	gap: 8px 12px; margin: 4px 0 16px;
 }
-.range-bar .row.nav { flex: 1 1 auto; justify-content: flex-end; }
-.range-bar .row.date-nav { flex: 1 1 auto; justify-content: flex-end; }
+/* On one line the period switch sits left and ‹ range › right; when they
+   don't fit (narrow screen, longer labels), the range centers on its own line. */
+.range-bar > .segmented { margin-right: auto; }
 /* Narrow phones: My tips gets a full row on top, hours and per-hour share the next. */
 @media (max-width: 420px) {
 	.card.person .cards.three { grid-template-columns: 1fr 1fr; }
@@ -322,7 +335,6 @@ button.link {
 .card.login { max-width: 380px; margin: 32px auto 0; display: grid; gap: 4px; }
 .card.login input { font-size: 1.3rem; letter-spacing: .2em; text-align: center; }
 .btn.block { width: 100%; }
-.block { display: block; }
 
 /* Daily entry */
 
@@ -333,9 +345,9 @@ button.link {
 .date-step { display: flex; gap: 4px; align-items: center; flex: 0 1 auto; min-width: 0; }
 .row.date-nav .btn { flex: none; }
 .date-step > .date-input { flex: 0 1 auto; width: auto; min-width: 0; }
-/* Day tips / Night tips tabs inside the card. */
+/* Day tips / Night tips / Summary tabs inside the card. */
 .shift-tabs {
-	display: grid; grid-template-columns: 1fr 1fr; gap: 2px;
+	display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px;
 	margin: 8px 0 12px; padding: 3px;
 	background: var(--surface-2);
 	border: 1px solid var(--line);
@@ -362,14 +374,21 @@ button.link {
 	font-variant-numeric: tabular-nums;
 }
 .split-line { font-weight: 600; color: var(--accent); min-height: 1.5em; margin: 0 0 4px; } /* height kept while empty */
-/* Auto-save status: between the tips field and the table. Height kept so the table never jumps. */
-.save-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 1.5em; margin: 0 0 4px; font-size: .85rem; font-weight: 600; color: var(--muted); }
-.save-status.saved { color: var(--accent); }
-.save-status.blocked, .save-status.failed { color: var(--danger); }
-.save-status .btn { flex: none; }
+/* Auto-save bar: one for both tabs, stuck under the sticky header so it is
+   always in view, even while typing hours far down the list. */
+.save-bar {
+	position: sticky; top: var(--topbar-h, 0px); z-index: 4;
+	display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+	min-height: 44px; margin: 8px 0 12px; padding: 8px 12px;
+	border: 1px solid var(--line); border-radius: var(--radius-sm);
+	background: var(--surface-2); color: var(--muted);
+	font-size: 1rem; font-weight: 700;
+}
+.save-bar.idle { font-weight: 600; }
+.save-bar.saved, .save-bar.stored { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.save-bar.blocked, .save-bar.failed { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
+.save-bar .btn { flex: none; margin-left: auto; }
 .notice.lock { background: var(--surface-2); border: 1px solid var(--line); }
-.entry-grid small { font-weight: 400; font-size: .75rem; }
-.entry-grid small .part { white-space: nowrap; }
 input:disabled { opacity: .65; background: var(--surface-2); }
 .badge.admin { background: var(--night-soft); color: var(--night); }
 .card.form > .btn { margin-top: 4px; }
@@ -402,24 +421,18 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.cards.three .stat-value { font-size: 1rem; }
 	.server-row { grid-template-columns: minmax(0, 1fr) auto; }
 	.server-row .row.tight { grid-column: 1 / -1; }
-	.entry-grid .col-hours { width: 76px; }
-	.entry-grid .col-share { width: 8.25rem; }
-	/* "Day $71.00" and "Night $10.00" on two lines instead of a line broken at the dot. */
-	.entry-grid small .part { display: block; }
-	.entry-grid small .sep { display: none; }
+	.entry-grid .col-hours { width: 90px; } /* room for "12.75" next to the saved ✓ */
+	.entry-grid .col-share { width: 7rem; }
 	.report-head h2 { font-size: 1.2rem; }
-	/* Period switch and ‹ range › each get their own full line: switch buttons
-	   share the width (never breaking "Bi-weekly"), the range sits in the middle (instead of wrapping to the right). */
-	.range-bar { flex-direction: column; align-items: stretch; }
-	.range-bar .segmented { display: flex; }
-	.range-bar .segmented button { flex: 1 1 auto; padding-left: 8px; padding-right: 8px; white-space: nowrap; }
-	.range-bar .row.nav, .range-bar .row.date-nav { justify-content: center; }
+	/* The period switch takes the full width (easier to tap); ‹ range › centers below it. */
+	.range-bar > .segmented { display: flex; flex: 1 1 100%; margin-right: 0; }
+	.range-bar .segmented button { flex: 1 1 auto; padding-left: 8px; padding-right: 8px; }
 }
 
 /* Phone held sideways: little height, so the header scrolls away instead of staying on top. */
 @media (orientation: landscape) and (max-height: 500px) {
 	.topbar { position: static; }
-	html { scroll-padding-top: 0; }
+	html { scroll-padding-top: 64px; } /* only the save bar stays on top */
 }
 
 @media (prefers-reduced-motion: reduce) {
