@@ -121,8 +121,11 @@
 	 */
 	function parseMoney(input) {
 		let s = String(input == null ? '' : input).trim().replace(/[\s$]/g, '');
+		if (/[.,]$/.test(s)) {
+			return null; // "400." or "400," is unfinished, not $400
+		}
 		s = /^\d*,\d{1,2}$/.test(s) ? s.replace(',', '.') : s.replace(/,/g, '');
-		const m = /^(\d+)(?:\.(\d{0,2}))?$/.exec(s) || /^()\.(\d{1,2})$/.exec(s);
+		const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(s) || /^()\.(\d{1,2})$/.exec(s);
 		if (!m) {
 			return null;
 		}
@@ -137,7 +140,8 @@
 	function parseHours(input) {
 		const s = String(input == null ? '' : input).trim().replace(',', '.');
 		let v = null;
-		let m = /^(\d{1,2})(?:\.(\d{0,2}))?$/.exec(s) || /^()\.(\d{1,2})$/.exec(s);
+		// "2." or "2," is unfinished, not 2 hours: a decimal point needs digits after it.
+		let m = /^(\d{1,2})(?:\.(\d{1,2}))?$/.exec(s) || /^()\.(\d{1,2})$/.exec(s);
 		if (m) {
 			v = (m[1] ? parseInt(m[1], 10) : 0) * 100 + parseInt((m[2] || '').padEnd(2, '0'), 10);
 		} else {

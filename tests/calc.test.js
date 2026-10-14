@@ -23,6 +23,11 @@ test('parseMoney', () => {
 	assert.equal(C.parseMoney('abc'), null);
 	assert.equal(C.parseMoney('1.234'), null);
 	assert.equal(C.parseMoney('-5'), null);
+	// A trailing dot or comma is unfinished typing, not a whole number.
+	assert.equal(C.parseMoney('400.'), null);
+	assert.equal(C.parseMoney('400,'), null);
+	assert.equal(C.parseMoney('.'), null);
+	assert.equal(C.parseMoney('400.5'), 40050);
 	// Phone keyboards that type a comma as the decimal point
 	assert.equal(C.parseMoney('12,50'), 1250);
 	assert.equal(C.parseMoney('12,5'), 1250);
@@ -54,6 +59,18 @@ test('parseHours / formatHours', () => {
 	assert.equal(C.parseHours('5.3'), null);
 	assert.equal(C.parseHours('5.33'), null);
 	assert.equal(C.parseHours('5:20'), null);
+	// A trailing dot or comma is unfinished typing, not a whole hour.
+	assert.equal(C.parseHours('2.'), null);
+	assert.equal(C.parseHours('2,'), null);
+	assert.equal(C.parseHours('.'), null);
+	assert.equal(C.parseHours('2,5'), 250); // decimal comma (some phone keyboards)
+	assert.equal(C.parseHours('0.25'), 25);
+	assert.equal(C.parseHours('2.50'), 250);
+	assert.equal(C.parseHours('2.250'), null);
+	assert.equal(C.parseHours('24'), 2400);
+	assert.equal(C.parseHours('24.25'), null);
+	assert.equal(C.parseHours('-2'), null);
+	assert.equal(C.parseHours('5:'), null);
 	assert.equal(C.parseHours('25'), null);
 	assert.equal(C.parseHours('5:75'), null);
 	assert.equal(C.formatHours(550), '5.5');
