@@ -146,7 +146,8 @@
 				v = parseInt(m[1], 10) * 100 + Math.round(parseInt(m[2], 10) * 100 / 60);
 			}
 		}
-		return v !== null && v <= MAX_SHIFT_HOURS ? v : null;
+		// Hours are kept in quarter steps (5, 5.25, 5.5, 5.75): 5.3 or 5:20 is a typo.
+		return v !== null && v <= MAX_SHIFT_HOURS && v % 25 === 0 ? v : null;
 	}
 
 	/** 550 → "5.5", 500 → "5", 525 → "5.25" */

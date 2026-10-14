@@ -17,6 +17,7 @@
 	--danger-soft: #fee2e2;
 	--warn-soft: #fff7ed;
 	--warn-line: #fdba74;
+	--check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3L13 4.5' fill='none' stroke='%230f766e' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 	--radius: 12px;
 	--radius-sm: 8px;
 	--shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 4px 16px rgba(0, 0, 0, .04);
@@ -41,6 +42,7 @@
 		--danger-soft: #3b1515;
 		--warn-soft: #33220f;
 		--warn-line: #9a5b1c;
+		--check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3L13 4.5' fill='none' stroke='%232dd4bf' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 		--shadow: none;
 	}
 }
@@ -52,8 +54,8 @@
 html {
 	-webkit-text-size-adjust: 100%;
 	/* A field focused near the top (keyboard opening) is not hidden under the sticky header
-	   (about 110px tall, plus the notch area in a home-screen app). */
-	scroll-padding-top: calc(120px + env(safe-area-inset-top));
+	   (--topbar-h, set by app.js; it includes the notch area) or the entry save bar under it. */
+	scroll-padding-top: calc(var(--topbar-h, 120px) + 64px);
 }
 /* No 300 ms double-tap-zoom wait on taps; no grey flash on iPhone. */
 button, input, select, summary { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
@@ -162,6 +164,13 @@ input:focus-visible, select:focus-visible, button:focus-visible {
 	outline: 2px solid var(--accent);
 	outline-offset: 1px;
 }
+/* Daily entry: typed but not saved yet (amber), saved (green + ✓), wrong (red, wins). */
+input.is-pending { border-color: var(--warn-line); background-color: var(--warn-soft); }
+input.is-saved {
+	border-color: var(--accent);
+	background: var(--check) no-repeat right 8px center / 16px, var(--accent-soft);
+	padding-right: 30px;
+}
 input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 
 
@@ -235,6 +244,8 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .entry-grid thead th { white-space: normal; }
 .entry-grid .name { overflow-wrap: anywhere; }
 .entry-grid .hours-cell input { text-align: right; }
+/* Hours are right-aligned, so their ✓ goes on the left. */
+.entry-grid .hours-cell input.is-saved { background-position: left 5px center, 0 0; background-size: 13px, auto; padding-left: 20px; padding-right: 6px; }
 .entry-grid .share { font-weight: 700; }
 
 .tag {
@@ -364,11 +375,20 @@ button.link {
 	font-variant-numeric: tabular-nums;
 }
 .split-line { font-weight: 600; color: var(--accent); min-height: 1.5em; margin: 0 0 4px; } /* height kept while empty */
-/* Auto-save status: between the tips field and the table. Height kept so the table never jumps. */
-.save-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 1.5em; margin: 0 0 4px; font-size: .85rem; font-weight: 600; color: var(--muted); }
-.save-status.saved { color: var(--accent); }
-.save-status.blocked, .save-status.failed { color: var(--danger); }
-.save-status .btn { flex: none; }
+/* Auto-save bar: one for both tabs, stuck under the sticky header so it is
+   always in view, even while typing hours far down the list. */
+.save-bar {
+	position: sticky; top: var(--topbar-h, 0px); z-index: 4;
+	display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+	min-height: 44px; margin: 8px 0 12px; padding: 8px 12px;
+	border: 1px solid var(--line); border-radius: var(--radius-sm);
+	background: var(--surface-2); color: var(--muted);
+	font-size: 1rem; font-weight: 700;
+}
+.save-bar.idle { font-weight: 600; }
+.save-bar.saved, .save-bar.stored { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.save-bar.blocked, .save-bar.failed { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
+.save-bar .btn { flex: none; margin-left: auto; }
 .notice.lock { background: var(--surface-2); border: 1px solid var(--line); }
 .entry-grid small { font-weight: 400; font-size: .75rem; }
 .entry-grid small .part { white-space: nowrap; }
@@ -404,8 +424,8 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.cards.three .stat-value { font-size: 1rem; }
 	.server-row { grid-template-columns: minmax(0, 1fr) auto; }
 	.server-row .row.tight { grid-column: 1 / -1; }
-	.entry-grid .col-hours { width: 76px; }
-	.entry-grid .col-share { width: 8.25rem; }
+	.entry-grid .col-hours { width: 90px; } /* room for "12.75" next to the saved ✓ */
+	.entry-grid .col-share { width: 7rem; }
 	/* "Day $71.00" and "Night $10.00" on two lines instead of a line broken at the dot. */
 	.entry-grid small .part { display: block; }
 	.entry-grid small .sep { display: none; }
@@ -418,7 +438,7 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 /* Phone held sideways: little height, so the header scrolls away instead of staying on top. */
 @media (orientation: landscape) and (max-height: 500px) {
 	.topbar { position: static; }
-	html { scroll-padding-top: 0; }
+	html { scroll-padding-top: 64px; } /* only the save bar stays on top */
 }
 
 @media (prefers-reduced-motion: reduce) {

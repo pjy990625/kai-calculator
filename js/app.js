@@ -397,6 +397,14 @@
 		return svg;
 	}
 
+	/** The entry save bar sticks right under the header, whose height varies (notch, font size). */
+	function syncTopbarHeight() {
+		const bar = document.querySelector('.topbar');
+		const h = bar && 'sticky' === window.getComputedStyle(bar).position ? bar.offsetHeight : 0;
+		document.documentElement.style.setProperty('--topbar-h', h + 'px');
+	}
+	window.addEventListener('resize', syncTopbarHeight);
+
 	function renderShell() {
 		const name = S.settings && S.settings.restaurant_name;
 		document.title = (name ? name + ' · ' : '') + t('appTitle');
@@ -443,6 +451,7 @@
 				},
 			}, tb[1]);
 		}));
+		syncTopbarHeight();
 	}
 
 	function render() {
@@ -632,11 +641,22 @@
 			dirty.night = false;
 		}
 		function onInput(shift) {
-			return function () {
+			return function (e) {
 				dirty[shift] = true;
+				edits.set(e.target, (edits.get(e.target) || 0) + 1);
+				markField(e.target, 'pending');
 				update();
 				scheduleSave();
 			};
+		}
+
+		// Each field shows its own state: amber border = typed, not saved yet;
+		// green border + ✓ = saved. `edits` counts typing per field so a field
+		// changed again while a save is on its way is not marked saved too early.
+		const edits = new Map();
+		function markField(field, state) {
+			field.classList.toggle('is-pending', 'pending' === state);
+			field.classList.toggle('is-saved', 'saved' === state);
 		}
 
 		const dayTipsInput = el('input', {
@@ -852,6 +872,7 @@
 			}
 			clearDirty();
 			setStatus('saving');
+			const sentEdits = new Map(edits);
 			inFlight = API.rpc('save_shifts', {
 				p_token: S.token,
 				p_date: date,
@@ -861,6 +882,12 @@
 				p_night_hours: sent.night ? f.hours.night : null,
 			}, { keepalive: !!keepalive }).then(function () {
 				actionsRow.hidden = false; // the record exists now: it can be deleted
+				sentEdits.forEach(function (n, field) {
+					if (edits.get(field) === n) {
+						edits.delete(field);
+						markField(field, 'saved');
+					}
+				});
 				if (!isDirty()) {
 					setStatus('saved');
 				}
@@ -900,11 +927,8 @@
 			}
 		}
 
-		/** One status line per tab, between the tips field and the table. */
-		const statusLines = {};
-		C.SHIFTS.forEach(function (shift) {
-			statusLines[shift] = el('p', { class: 'save-status', role: 'status' });
-		});
+		/** One save bar for both tabs; it stays in view under the header while scrolling. */
+		const statusBar = el('div', { class: 'save-bar', role: 'status' });
 		let statusKind = '';
 		function setStatus(kind, msg) {
 			if ('saving' === kind && 'saving' === statusKind) {
@@ -912,7 +936,11 @@
 			}
 			statusKind = kind;
 			let text = '';
-			if ('saving' === kind) {
+			if ('idle' === kind) {
+				text = t('autoIdle');
+			} else if ('stored' === kind) {
+				text = t('autoStored');
+			} else if ('saving' === kind) {
 				text = t('autoSaving');
 			} else if ('saved' === kind) {
 				text = t('autoSaved', { time: niceTime(new Date()) });
@@ -921,13 +949,10 @@
 			} else if ('failed' === kind) {
 				text = t('autoFailed', { reason: msg }) + ' ';
 			}
-			C.SHIFTS.forEach(function (shift) {
-				const line = statusLines[shift];
-				line.className = 'save-status ' + kind;
-				line.replaceChildren(text, 'failed' === kind
-					? el('button', { type: 'button', class: 'btn small', onclick: function () { saveNow(); } }, t('retry'))
-					: '');
-			});
+			statusBar.className = 'save-bar ' + kind;
+			statusBar.replaceChildren(el('span', { text: text }), 'failed' === kind
+				? el('button', { type: 'button', class: 'btn small', onclick: function () { saveNow(); } }, t('retry'))
+				: '');
 		}
 
 		/**
@@ -1008,7 +1033,6 @@
 				el('div', { class: 'tips-grid' }, [
 					el('label', { class: 'field' }, [el('span', { text: t('dayTips') }), dayTipsInput]),
 				]),
-				locked ? null : statusLines.day,
 				leftoverOut.day,
 				hoursTable('day', t('share')),
 			]),
@@ -1017,7 +1041,6 @@
 					el('label', { class: 'field' }, [el('span', { text: t('totalTips') }), totalInput]),
 					el('div', { class: 'field' }, [el('span', { text: t('nightTipsAuto') }), nightOut]),
 				]),
-				locked ? null : statusLines.night,
 				totalHint,
 				leftoverOut.night,
 				hoursTable('night', t('shareWholeDay')),
@@ -1044,6 +1067,7 @@
 		const form = el('form', { class: 'card narrow', onsubmit: onSubmit, novalidate: true }, [
 			picker.node,
 			status,
+			locked ? null : statusBar,
 			el('div', { class: 'shift-tabs', role: 'tablist', 'aria-label': t('entryTitle') }, [tabButtons.day, tabButtons.night]),
 			panels.day,
 			panels.night,
@@ -1075,6 +1099,7 @@
 		}
 		showShift(S.entryShift);
 		update();
+		setStatus(rec ? 'stored' : 'idle');
 		return form;
 	}
 
