@@ -21,6 +21,7 @@
 	--radius: 12px;
 	--radius-sm: 8px;
 	--shadow: 0 1px 2px rgba(0, 0, 0, .04), 0 4px 16px rgba(0, 0, 0, .04);
+	--scroll-shade: rgba(0, 0, 0, .16);
 	--font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", Roboto, sans-serif;
 }
 
@@ -44,6 +45,7 @@
 		--warn-line: #9a5b1c;
 		--check: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3L13 4.5' fill='none' stroke='%232dd4bf' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 		--shadow: none;
+		--scroll-shade: rgba(255, 255, 255, .16); /* a dark shadow does not show on a dark card */
 	}
 }
 
@@ -215,6 +217,13 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 /* Tables */
 
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -4px; }
+/* A shadow on the right edge while more columns are hidden to the right. The first layer scrolls
+   with the table and covers the shadow once the table is scrolled to its end (no JS needed). */
+.table-wrap {
+	background:
+		linear-gradient(var(--surface), var(--surface)) 100% 0 / 16px 100% no-repeat local,
+		radial-gradient(farthest-side at 100% 50%, var(--scroll-shade), transparent) 100% 0 / 12px 100% no-repeat scroll;
+}
 table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 .grid th, .grid td { padding: 8px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
 .grid thead th { font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); font-weight: 600; white-space: nowrap; }
@@ -427,6 +436,8 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	/* The period switch takes the full width (easier to tap); ‹ range › centers below it. */
 	.range-bar > .segmented { display: flex; flex: 1 1 100%; margin-right: 0; }
 	.range-bar .segmented button { flex: 1 1 auto; padding-left: 8px; padding-right: 8px; }
+	/* Long column titles wrap to two lines, so more columns fit before the table scrolls. */
+	.report-grid thead th { white-space: normal; }
 }
 
 /* Phone held sideways: little height, so the header scrolls away instead of staying on top. */
@@ -448,7 +459,7 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 	.print-only { display: block; }
 	.topbar { position: static; border: 0; }
 	.card { border: 0; box-shadow: none; padding: 0; }
-	.table-wrap { overflow: visible; }
+	.table-wrap { overflow: visible; background: none; }
 	main { padding: 0; }
 }
 
@@ -466,7 +477,6 @@ input:disabled { opacity: .65; background: var(--surface-2); }
 /* Narrow phones: the per-person and daily tables fit without sideways scrolling. */
 @media (max-width: 380px) {
 	.report-grid th, .report-grid td, .daily-grid th, .daily-grid td { padding-left: 4px; padding-right: 4px; }
-	.report-grid thead th { white-space: normal; }
 }
 
 /* Servers tab: staff see names as text (only the admin can rename). */
