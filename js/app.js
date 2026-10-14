@@ -1206,6 +1206,9 @@
 			parts.push(el('div', { class: 'notice warn', text: t('retentionNote', { months: S.settings.retention_months, date: niceDate(S.retentionStart) }) }));
 		}
 		s.warnings.forEach(function (w) {
+			if ('missingTotal' === w.type && w.date === S.today) {
+				return; // normal until closing: the table already shows "missing"
+			}
 			parts.push(el('div', {
 				class: 'notice warn',
 				text: 'missingTotal' === w.type
@@ -1585,7 +1588,8 @@
 						});
 					},
 				}),
-				el('span', { class: 'badge ' + (s.active ? 'on' : 'off'), text: s.active ? t('active') : t('inactive') }),
+				// Only inactive servers are marked; the empty span keeps the columns lined up.
+				s.active ? el('span') : el('span', { class: 'badge', text: t('inactive') }),
 				isAdmin() ? el('div', { class: 'row tight' }, [
 					el('button', {
 						type: 'button',
