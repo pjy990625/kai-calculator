@@ -36,6 +36,9 @@
 	// The open entry form ({flush, leave, date, unsaved}), so leaving it can save first.
 	let entryForm = null;
 	const AUTOSAVE_MS = 1500;
+	// Typing that can still become a valid value (see readForm in the daily entry).
+	const UNFINISHED_HOURS = /^\d{0,2}(?:[.,][27]?|:[0-5]?)$/; // 2. 2.2 2.7 5: 5:4
+	const UNFINISHED_MONEY = /^[\d,]*\d[.,]$/;               // 400. 400,
 
 	/* ------------------------------------------------------------------ */
 	/* Small helpers                                                       */
@@ -713,10 +716,25 @@
 			]));
 		}
 
-		function readForm() {
-			const out = { bad: { day: [], night: [] }, hours: { day: [], night: [] }, weights: { day: [], night: [] } };
-			const dayRaw = dayTipsInput.value.trim();
-			const totalRaw = totalInput.value.trim();
+		/**
+		 * The form's values. `soft` (while typing): in the field being typed in,
+		 * a value that can still become right ("2." / "2.2" / "5:4" on the way to
+		 * 2.25 or 5:45, "400." on the way to 400.50) is unfinished, not wrong. It
+		 * is not marked red or saved, and the amounts use its whole-number part.
+		 * Explicit saves (leaving a field, the date or the tab) read it as wrong.
+		 */
+		function readForm(soft) {
+			const out = { bad: { day: [], night: [] }, hours: { day: [], night: [] }, weights: { day: [], night: [] }, typing: false };
+			function raw(field, parse, unfinished) {
+				const v = field.value.trim();
+				if (soft && field === document.activeElement && v !== '' && parse(v) === null && unfinished.test(v)) {
+					out.typing = true;
+					return v.replace(/[.,:]\d?$/, '');
+				}
+				return v;
+			}
+			const dayRaw = raw(dayTipsInput, C.parseMoney, UNFINISHED_MONEY);
+			const totalRaw = raw(totalInput, C.parseMoney, UNFINISHED_MONEY);
 			out.dayTips = dayRaw === '' ? null : C.parseMoney(dayRaw);
 			out.dayTipsInvalid = dayRaw !== '' && out.dayTips === null;
 			out.totalTips = totalRaw === '' ? null : C.parseMoney(totalRaw);
@@ -726,8 +744,8 @@
 			C.SHIFTS.forEach(function (shift) {
 				servers.forEach(function (s) {
 					const field = inputs[shift][s.id];
-					const raw = field.value.trim();
-					const v = raw === '' ? 0 : C.parseHours(raw);
+					const text = raw(field, C.parseHours, UNFINISHED_HOURS);
+					const v = text === '' ? 0 : C.parseHours(text);
 					field.classList.toggle('invalid', v === null);
 					if (v === null) {
 						out.bad[shift].push(s.name);
@@ -741,7 +759,7 @@
 		}
 
 		function update() {
-			const f = readForm();
+			const f = readForm(true);
 			C.SHIFTS.forEach(function (shift) {
 				foot[shift].hours.textContent = C.formatHours(C.sumWeights(f.weights[shift]));
 			});
@@ -850,7 +868,7 @@
 
 		function scheduleSave() {
 			clearTimeout(timer);
-			timer = setTimeout(function () { saveNow(); }, AUTOSAVE_MS);
+			timer = setTimeout(function () { saveNow(false, true); }, AUTOSAVE_MS);
 			setStatus('saving');
 		}
 
@@ -866,8 +884,11 @@
 			return null;
 		}
 
-		/** Save what was typed now. Returns the save's promise, or null if nothing was sent. */
-		function saveNow(keepalive) {
+		/**
+		 * Save what was typed now. Returns the save's promise, or null if nothing was sent.
+		 * `soft` (auto-save while typing): wait while a field is unfinished ("2.").
+		 */
+		function saveNow(keepalive, soft) {
 			clearTimeout(timer);
 			timer = null;
 			if (inFlight) {
@@ -877,7 +898,11 @@
 			if (!isDirty()) {
 				return null;
 			}
-			const f = readForm();
+			const f = readForm(soft);
+			if (f.typing) {
+				timer = setTimeout(function () { saveNow(false, true); }, AUTOSAVE_MS); // leaving the field saves it
+				return null;
+			}
 			const sent = { day: dirty.day, night: dirty.night };
 			const problem = firstProblem(f, sent);
 			blocked = problem;
@@ -914,7 +939,7 @@
 				inFlight = null;
 				if (again && alive) {
 					again = false;
-					saveNow();
+					saveNow(false, true); // typed during the save: maybe still typing
 				}
 			});
 			return inFlight;
