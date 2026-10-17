@@ -616,8 +616,10 @@ $$;
 --   hours: [{"server_id": "...", "hundredths": 550}, ...]
 --
 -- Night tips are never stored: night tips = whole-day total − day tips.
---   p_editor      who is changing a past day (a server id). Staff must give it for
---                 any date before today; it goes into the audit log.
+--   p_editor      no longer used (older pages send who changed a past day); if
+--                 given, the name goes into the audit log.
+-- A past day opens read-only in the app until "Edit" is tapped; the database
+-- only enforces the 7 days (can_edit). The audit log marks past-day changes.
 drop function if exists public.save_shifts(text, date, bigint, jsonb, bigint, jsonb); -- older signature
 create or replace function public.save_shifts(
 	p_token text,
@@ -664,9 +666,6 @@ begin
 	end if;
 	if p_editor is not null then
 		select s.name into v_editor from private.servers s where s.id = p_editor and private.sees_team(v_role, s.team);
-	end if;
-	if v_past and v_role <> 'admin' and v_editor is null then
-		perform private.fail('editor_required'); -- "Edit" was not tapped (or an old version of the page)
 	end if;
 
 	-- The shift that is not being saved keeps what is stored.
@@ -926,9 +925,8 @@ $$;
 -- with their tips) or the admin (from the paper sheet). Replaces all of that
 -- date's kitchen hours.
 --   p_hours:  [{"server_id": "...", "hundredths": 950}, ...]   ([] = nobody)
---   p_editor: who is changing a past day (a kitchen or sushi bar person). The
---             kitchen login must give it for any date before today; it goes
---             into the audit log.
+--   p_editor: no longer used (see save_shifts); if given, the name goes into
+--             the audit log.
 drop function if exists public.save_kitchen_hours(text, date, jsonb); -- older signature
 create or replace function public.save_kitchen_hours(p_token text, p_date date, p_hours jsonb, p_editor uuid default null)
 returns json
@@ -959,9 +957,6 @@ begin
 	end if;
 	if p_editor is not null then
 		select s.name into v_editor from private.servers s where s.id = p_editor and s.team in ('kitchen', 'sushi');
-	end if;
-	if v_past and v_role <> 'admin' and v_editor is null then
-		perform private.fail('editor_required'); -- "Edit" was not tapped
 	end if;
 	perform private.check_hours(p_hours, array['kitchen', 'sushi']);
 
