@@ -34,7 +34,7 @@
 		entryDate: null,
 		entryShift: 'day', // which tab of the daily entry card is open: 'day' | 'night' | 'sum'
 		entryShiftDate: null, // the date entryShift was chosen for
-		unlock: null, // { date, side, editorId, name }: a past date opened with "Edit" (see unlockBox)
+		unlock: null, // { date, side }: a past date opened with "Edit" (see unlockBox)
 		reportKind: 'period', // 'period' | 'month'
 		reportDate: null,
 		personId: null, // set: Reports shows this server's hours day by day
@@ -761,58 +761,39 @@
 	}
 
 	/**
-	 * A past day, read-only: pick who is changing it (a login is shared by
-	 * many people, so the audit log needs a name), confirm, and the form opens
-	 * for editing. `people`: the names to pick from.
+	 * A past day, read-only: tap Edit and confirm, and the form opens for
+	 * editing (until another date is picked or Done is tapped).
 	 */
-	function unlockBox(date, people, sideName) {
-		const admin = isAdmin();
-		const who = admin ? null : el('select', { 'aria-label': t('whoEdits') }, [el('option', { value: '', text: t('pickName') })]
-			.concat(people.filter(function (s) { return s.active; }).map(function (s) {
-				return el('option', { value: s.id, text: s.name });
-			})));
-		const error = el('p', { class: 'unlock-error', role: 'alert', hidden: true });
+	function unlockBox(date, sideName) {
 		function onEdit() {
-			const id = who ? who.value : '';
-			if (who && !id) {
-				error.textContent = t('pickNameFirst');
-				error.hidden = false;
-				who.focus();
-				return;
-			}
 			if (!window.confirm(t('confirmEditPast', { date: niceDate(date, true) }))) {
 				return;
 			}
-			const server = S.servers.find(function (s) { return s.id === id; });
-			S.unlock = { date: date, side: sideName, editorId: id || null, name: server ? server.name : t('roleAdmin') };
+			S.unlock = { date: date, side: sideName };
 			render();
 		}
-		return el('div', { class: 'notice lock unlock-box' }, [
-			el('p', { text: '🔒 ' + t(admin ? 'pastLockedAdmin' : 'pastLocked') }),
-			el('div', { class: 'row tight' }, [
-				who,
-				el('button', { type: 'button', class: 'btn primary small', onclick: onEdit }, t('editPast')),
-			]),
-			error,
+		return el('div', { class: 'notice lock unlock-box row' }, [
+			el('span', { text: '🔒 ' + t('pastLocked') }),
+			el('button', { type: 'button', class: 'btn primary small', onclick: onEdit }, t('editPast')),
 		]);
 	}
 
 	/**
 	 * The line under the date: why it is locked, the Edit box of a past day,
-	 * or who is changing it (with Done). `leave` saves what was typed first.
+	 * or that a past day is being changed (with Done). `leave` saves what was typed first.
 	 */
-	function dayStatus(date, locked, guarded, unlock, people, sideName, leave) {
+	function dayStatus(date, locked, guarded, unlock, sideName, leave) {
 		if (locked) {
 			return el('p', { class: 'notice lock', text: '🔒 ' + locked });
 		}
 		if (guarded) {
-			return unlockBox(date, people, sideName);
+			return unlockBox(date, sideName);
 		}
 		if (!unlock) {
 			return null;
 		}
 		return el('div', { class: 'notice edit-on row' }, [
-			el('span', { text: '✏ ' + t('editingPast', { name: unlock.name }) }),
+			el('span', { text: '✏ ' + t('editingPast') }),
 			el('button', { type: 'button', class: 'btn small', onclick: function () {
 				// Save what was typed, then lock the day again.
 				const r = leave();
@@ -1130,8 +1111,6 @@
 				p_day_hours: sent.day ? f.hours.day : null,
 				p_total_tips_cents: sent.night ? f.totalTips : null,
 				p_night_hours: sent.night ? f.hours.night : null,
-				// Only for a past day (older databases don't know this argument).
-				p_editor: unlock && unlock.editorId ? unlock.editorId : undefined,
 			}, { keepalive: !!keepalive }).then(function () {
 				actionsRow.hidden = false; // the record exists now: it can be deleted
 				sentEdits.forEach(function (n, field) {
@@ -1253,7 +1232,7 @@
 			el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')),
 		]) : el('div', { hidden: true });
 
-		const status = dayStatus(date, locked, guarded, unlock, serverStaff(), 'server', leave);
+		const status = dayStatus(date, locked, guarded, unlock, 'server', leave);
 
 		// The two tabs. Both panels stay in the page (one hidden), so switching
 		// tabs never throws away what was typed.
@@ -2118,8 +2097,6 @@
 				p_token: S.token,
 				p_date: date,
 				p_hours: f.hours,
-				// Only for a past day (older databases don't know this argument).
-				p_editor: unlock && unlock.editorId ? unlock.editorId : undefined,
 			}, { keepalive: !!keepalive })
 				.then(function () {
 					sentEdits.forEach(function (n, field) {
@@ -2233,7 +2210,7 @@
 			},
 		}, [
 			picker.node,
-			dayStatus(date, locked, guarded, unlock, kitchenStaff(), 'kitchen', leave),
+			dayStatus(date, locked, guarded, unlock, 'kitchen', leave),
 			people.length && !readOnly ? bar.node : null,
 			poolLine,
 			table,

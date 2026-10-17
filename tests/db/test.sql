@@ -139,25 +139,27 @@ select test.ok((public.get_range(:'staff_token', :'today'::date, :'today'::date)
 select test.ok(test.err(format('select public.get_range(%L, %L::date, %L::date - 1)', :'staff_token', :'today', :'today')) = 'invalid_range', 'reversed range rejected');
 select test.ok(test.err(format('select public.get_range(%L, %L::date - 200, %L::date)', :'staff_token', :'today', :'today')) = 'invalid_range', 'huge range rejected');
 
-\echo '-- staff: the last 7 days (a past day needs a name); older days and deleting a past day: admin only'
+\echo '-- staff: the last 7 days; older days and deleting a past day: admin only'
 select test.ok((public.get_bootstrap(:'staff_token'))->>'staff_edit_from' = (:'today'::date - 6)::text, 'staff can change a day for 7 days, counting the day itself');
-select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 1, 1000, %L::jsonb, null, null)', :'staff_token', :'today', '[]')) = 'editor_required', 'staff must say who changes yesterday');
-select test.ok(test.err(format('select public.save_day(%L, %L::date - 1, 1000, null, %L::jsonb)', :'staff_token', :'today', '[]')) = 'editor_required', 'old API cannot change yesterday (no name)');
-select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 1, 1000, %L::jsonb, null, null, %L)', :'staff_token', :'today', '[]', gen_random_uuid())) = 'editor_required', 'unknown name rejected');
-select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 7, 1000, %L::jsonb, null, null, %L)', :'staff_token', :'today', '[]', :'alice')) = 'date_locked', 'staff cannot back-fill 7 days ago');
-select test.ok((public.save_shifts(:'staff_token', :'today'::date - 1, 1000, :'day_hours'::jsonb, null, null, :'alice'))->>'ok' = 'true', 'staff creates yesterday with a name');
-select test.ok((public.save_shifts(:'staff_token', :'today'::date - 1, 1500, '[]'::jsonb, 2000, '[]'::jsonb, :'bob'))->>'ok' = 'true', 'staff changes yesterday with a name');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 7, 1000, %L::jsonb, null, null)', :'staff_token', :'today', '[]')) = 'date_locked', 'staff cannot back-fill 7 days ago');
+select test.ok((public.save_shifts(:'staff_token', :'today'::date - 1, 1000, :'day_hours'::jsonb, null, null))->>'ok' = 'true', 'staff creates yesterday (no name needed)');
+select test.ok((public.save_shifts(:'staff_token', :'today'::date - 1, 1500, '[]'::jsonb, 2000, '[]'::jsonb))->>'ok' = 'true', 'staff changes yesterday (no name needed)');
 reset role;
-select test.ok((select detail -> 'editor' ->> 'name' = 'Bobby' and (detail ->> 'past_day')::boolean
+select test.ok((select detail -> 'editor' = 'null'::jsonb and role = 'staff' and (detail ->> 'past_day')::boolean
 	and jsonb_array_length(detail -> 'before' -> 'day_hours') = 2 and (detail -> 'before' ->> 'day_tips_cents')::int = 1000
 	and (detail -> 'after' ->> 'day_tips_cents')::int = 1500
 	from private.audit_log where action = 'update_day' and (detail ->> 'date')::date = :'today'::date - 1 order by id desc limit 1),
-	'audit log keeps who changed yesterday, and the tips and hours before and after');
-select test.ok((select not (detail ->> 'past_day')::boolean and detail -> 'editor' = 'null'::jsonb
-	from private.audit_log where (detail ->> 'date')::date = :'today'::date order by id desc limit 1), 'today needs no name');
+	'audit log marks the past-day change (servers'' PIN), with the tips and hours before and after');
 set role anon;
-select test.ok((public.save_shifts(:'admin_token', :'today'::date - 7, 1000, '[]'::jsonb, null, null))->>'ok' = 'true', 'admin can back-fill without a name');
-select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 7, null, null, 2000, %L::jsonb, %L)', :'staff_token', :'today', '[]', :'alice')) = 'locked', 'staff cannot change 7 days ago');
+select test.ok((public.save_shifts(:'staff_token', :'today'::date - 1, 1500, '[]'::jsonb, null, null, :'bob'))->>'ok' = 'true', 'an older page that sends a name still works');
+reset role;
+select test.ok((select detail -> 'editor' ->> 'name' = 'Bobby'
+	from private.audit_log where action = 'update_day' order by id desc limit 1), '... and the name is kept in the audit log');
+select test.ok((select not (detail ->> 'past_day')::boolean and detail -> 'editor' = 'null'::jsonb
+	from private.audit_log where (detail ->> 'date')::date = :'today'::date order by id desc limit 1), 'today is not a past-day change');
+set role anon;
+select test.ok((public.save_shifts(:'admin_token', :'today'::date - 7, 1000, '[]'::jsonb, null, null))->>'ok' = 'true', 'admin can back-fill older days');
+select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 7, null, null, 2000, %L::jsonb)', :'staff_token', :'today', '[]')) = 'locked', 'staff cannot change 7 days ago');
 select test.ok(test.err(format('select public.delete_day(%L, %L::date - 1)', :'staff_token', :'today')) = 'locked', 'staff cannot delete yesterday');
 select test.ok((public.get_range(:'staff_token', :'today'::date - 1, :'today'::date - 1))->'days'->0->>'editable' = 'true', 'yesterday editable by staff');
 select test.ok((public.save_shifts(:'staff_token', :'today'::date - 6, 1000, '[]'::jsonb, null, null, :'alice'))->>'ok' = 'true', 'staff can still add 6 days ago (with a name)');
@@ -207,13 +209,11 @@ set role anon;
 
 select format('[{"server_id":"%s","hundredths":950},{"server_id":"%s","hundredths":800}]', :'chad', :'ryan') as k_hours \gset
 select test.ok((public.save_kitchen_hours(:'kitchen_token', :'today'::date, :'k_hours'::jsonb))->>'ok' = 'true', 'the kitchen login enters today''s hours');
-select test.ok(test.err(format('select public.save_kitchen_hours(%L, %L::date - 1, %L::jsonb)', :'kitchen_token', :'today', :'k_hours')) = 'editor_required', 'kitchen: a past day needs who is changing it');
-select test.ok(test.err(format('select public.save_kitchen_hours(%L, %L::date - 1, %L::jsonb, %L)', :'kitchen_token', :'today', :'k_hours', :'bob')) = 'editor_required', 'kitchen: a server cannot be the editor');
-select test.ok((public.save_kitchen_hours(:'kitchen_token', :'today'::date - 6, :'k_hours'::jsonb, :'chad'))->>'ok' = 'true', 'kitchen: 6 days ago with a name is open');
-select test.ok(test.err(format('select public.save_kitchen_hours(%L, %L::date - 7, %L::jsonb, %L)', :'kitchen_token', :'today', :'k_hours', :'chad')) = 'locked', 'kitchen: 7 days ago is closed');
+select test.ok((public.save_kitchen_hours(:'kitchen_token', :'today'::date - 6, :'k_hours'::jsonb))->>'ok' = 'true', 'kitchen: 6 days ago is open (no name needed)');
+select test.ok(test.err(format('select public.save_kitchen_hours(%L, %L::date - 7, %L::jsonb)', :'kitchen_token', :'today', :'k_hours')) = 'locked', 'kitchen: 7 days ago is closed');
 reset role;
-select test.ok((select detail ->> 'past_day' = 'true' and detail -> 'editor' ->> 'name' = 'Chad' and role = 'kitchen'
-	from private.audit_log where action = 'save_kitchen_hours' order by id desc limit 1), 'kitchen past-day edit audited with the name');
+select test.ok((select detail ->> 'past_day' = 'true' and role = 'kitchen'
+	from private.audit_log where action = 'save_kitchen_hours' order by id desc limit 1), 'kitchen past-day edit audited (kitchen PIN)');
 delete from private.kitchen_hours where date = private.today() - 6;
 set role anon;
 select test.ok(test.err(format('select public.save_kitchen_hours(%L, %L::date, %L::jsonb)', :'staff_token', :'today', :'k_hours')) = 'admin_only', 'servers cannot enter kitchen hours');

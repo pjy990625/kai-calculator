@@ -414,9 +414,7 @@ button.link {
 .save-bar.blocked, .save-bar.failed { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
 .save-bar .btn { flex: none; margin-left: auto; }
 .notice.lock { background: var(--surface-2); border: 1px solid var(--line); }
-.unlock-box p { margin: 0 0 8px; }
-.unlock-box select { flex: 1 1 10rem; min-width: 0; }
-.unlock-box .unlock-error { margin: 8px 0 0; color: var(--danger); }
+.unlock-box { justify-content: space-between; flex-wrap: wrap; }
 /* A past day opened with "Edit": clearly not the normal (today) state. */
 .notice.edit-on { background: var(--warn-soft); border: 1px solid var(--warn-line); justify-content: space-between; flex-wrap: wrap; }
 input:disabled { opacity: .65; background: var(--surface-2); }
