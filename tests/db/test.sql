@@ -162,7 +162,7 @@ select test.ok((public.save_shifts(:'admin_token', :'today'::date - 7, 1000, '[]
 select test.ok(test.err(format('select public.save_shifts(%L, %L::date - 7, null, null, 2000, %L::jsonb)', :'staff_token', :'today', '[]')) = 'locked', 'staff cannot change 7 days ago');
 select test.ok(test.err(format('select public.delete_day(%L, %L::date - 1)', :'staff_token', :'today')) = 'locked', 'staff cannot delete yesterday');
 select test.ok((public.get_range(:'staff_token', :'today'::date - 1, :'today'::date - 1))->'days'->0->>'editable' = 'true', 'yesterday editable by staff');
-select test.ok((public.save_shifts(:'staff_token', :'today'::date - 6, 1000, '[]'::jsonb, null, null, :'alice'))->>'ok' = 'true', 'staff can still add 6 days ago (with a name)');
+select test.ok((public.save_shifts(:'staff_token', :'today'::date - 6, 1000, '[]'::jsonb, null, null))->>'ok' = 'true', 'staff can still add 6 days ago');
 select test.ok((public.get_range(:'staff_token', :'today'::date - 6, :'today'::date - 6))->'days'->0->>'editable' = 'true', '6 days ago editable by staff');
 select test.ok((public.get_range(:'staff_token', :'today'::date - 7, :'today'::date - 7))->'days'->0->>'editable' = 'false', '7 days ago shown as locked to staff');
 select test.ok((public.get_range(:'admin_token', :'today'::date - 7, :'today'::date - 7))->'days'->0->>'editable' = 'true', 'admin can still edit older days');

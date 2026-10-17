@@ -34,7 +34,7 @@
 		entryDate: null,
 		entryShift: 'day', // which tab of the daily entry card is open: 'day' | 'night' | 'sum'
 		entryShiftDate: null, // the date entryShift was chosen for
-		unlock: null, // { date, side }: a past date opened with "Edit" (see unlockBox)
+		unlock: null, // { date }: a past date opened with "Edit" (see dayLock)
 		reportKind: 'period', // 'period' | 'month'
 		reportDate: null,
 		personId: null, // set: Reports shows this server's hours day by day
@@ -498,6 +498,7 @@
 				}
 				S.personId = null;
 				S.kitchenPersonId = null;
+				S.unlock = null; // "Edit" was for the other side's form
 				render();
 			}) : '');
 			sides.hidden = !isAdmin();
@@ -741,35 +742,29 @@
 		return editable ? null : t('lockClosed');
 	}
 
-	/** Kitchen hours: why the date can't be edited (null = editable). Same 7 days as the servers. */
-	function kitchenLockReason(date) {
-		if (date > S.today) {
-			return t('lockFuture');
-		}
-		if (S.retentionStart && date < S.retentionStart) {
-			return t('lockTooOld', { months: S.settings.retention_months });
-		}
-		return isAdmin() || date >= S.staffEditFrom ? null : t('lockClosed');
-	}
-
-	/** The "Edit" of a past day still holds for this date and side (else it is dropped). */
-	function unlockFor(date, sideName) {
-		if (S.unlock && (S.unlock.date !== date || (S.unlock.side || 'server') !== sideName)) {
+	/**
+	 * A past day opens read-only so it can't be changed by a stray tap. "Edit"
+	 * opens it until another date or side is picked (or Done is tapped).
+	 * `locked`: lockReason (null = the date can be changed at all).
+	 */
+	function dayLock(date, locked) {
+		if (S.unlock && S.unlock.date !== date) {
 			S.unlock = null;
 		}
-		return S.unlock;
+		const guarded = !locked && date < S.today && !S.unlock;
+		return { locked: locked, unlocked: !!S.unlock, guarded: guarded, readOnly: !!locked || guarded };
 	}
 
 	/**
 	 * A past day, read-only: tap Edit and confirm, and the form opens for
 	 * editing (until another date is picked or Done is tapped).
 	 */
-	function unlockBox(date, sideName) {
+	function unlockBox(date) {
 		function onEdit() {
 			if (!window.confirm(t('confirmEditPast', { date: niceDate(date, true) }))) {
 				return;
 			}
-			S.unlock = { date: date, side: sideName };
+			S.unlock = { date: date };
 			render();
 		}
 		// Just the button: the greyed-out fields already show the day is locked.
@@ -778,17 +773,17 @@
 	}
 
 	/**
-	 * The line under the date: why it is locked, the Edit box of a past day,
-	 * or that a past day is being changed (with Done). `leave` saves what was typed first.
+	 * The line under the date (see dayLock): why it is locked, the Edit button of a
+	 * past day, or that a past day is being changed (with Done). `leave` saves what was typed first.
 	 */
-	function dayStatus(date, locked, guarded, unlock, sideName, leave) {
-		if (locked) {
-			return el('p', { class: 'notice lock', text: '🔒 ' + locked });
+	function dayStatus(date, lock, leave) {
+		if (lock.locked) {
+			return el('p', { class: 'notice lock', text: '🔒 ' + lock.locked });
 		}
-		if (guarded) {
-			return unlockBox(date, sideName);
+		if (lock.guarded) {
+			return unlockBox(date);
 		}
-		if (!unlock) {
+		if (!lock.unlocked) {
 			return null;
 		}
 		return el('div', { class: 'notice edit-on row' }, [
@@ -813,12 +808,8 @@
 	}
 
 	function renderDayForm(date, rec, input) {
-		const locked = lockReason(date, rec);
-		// A past day opens read-only so it can't be changed by a stray tap. "Edit" (with the
-		// name of who is changing it, for the audit log) opens it until another date is picked.
-		const unlock = unlockFor(date, 'server');
-		const guarded = !locked && date < S.today && !unlock;
-		const readOnly = !!locked || guarded;
+		const lock = dayLock(date, lockReason(date, rec));
+		const readOnly = lock.readOnly;
 		const pct = S.settings.server_pct;
 		const myHours = input.hours.filter(function (h) { return h.date === date; });
 		function savedHours(serverId, shift) {
@@ -1136,11 +1127,11 @@
 		}
 
 		function onSaveError(e) {
-			if (e && ('locked' === e.code || 'date_locked' === e.code || 'editor_required' === e.code)) {
-				// Midnight passed (staff): the day is closed, or now needs "Edit" first.
+			if (e && ('locked' === e.code || 'date_locked' === e.code)) {
+				// Midnight passed (staff): the day is closed.
 				clearDirty();
 				again = false;
-				toast(t('editor_required' === e.code ? 'err_editor_required' : 'err_locked'), 'error');
+				toast(t('err_locked'), 'error');
 				if (alive) {
 					refreshBootstrap().catch(function () {}).then(render);
 				}
@@ -1231,7 +1222,7 @@
 			el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')),
 		]) : el('div', { hidden: true });
 
-		const status = dayStatus(date, locked, guarded, unlock, 'server', leave);
+		const status = dayStatus(date, lock, leave);
 
 		// The two tabs. Both panels stay in the page (one hidden), so switching
 		// tabs never throws away what was typed.
@@ -1992,14 +1983,12 @@
 	 * Saves itself like the daily tips (see saveBar / markField): the whole
 	 * date is sent each time, so it is always exactly what is on screen.
 	 * Locks like the daily tips too: 7 days for the kitchen login, and a past
-	 * day opens read-only until Edit is tapped (with a name, for the audit log).
+	 * day opens read-only until Edit is tapped.
 	 */
 	function kitchenHoursForm(date, input) {
 		const pct = S.settings.server_pct;
-		const locked = kitchenLockReason(date);
-		const unlock = unlockFor(date, 'kitchen');
-		const guarded = !locked && date < S.today && !unlock;
-		const readOnly = !!locked || guarded;
+		const lock = dayLock(date, lockReason(date, null)); // same 7 days as the daily tips
+		const readOnly = lock.readOnly;
 		const saved = {};
 		input.kitchenHours.forEach(function (h) {
 			if (h.date === date) {
@@ -2108,16 +2097,17 @@
 						bar.set('saved');
 					}
 				}, function (e) {
-					dirty = true;
-					if (e && ('locked' === e.code || 'editor_required' === e.code)) {
-						// Midnight passed: the day is closed, or now needs "Edit" first.
-						dirty = false;
+					if (e && 'locked' === e.code) {
+						// Midnight passed: the day is closed.
 						again = false;
-						toast(t('editor_required' === e.code ? 'err_editor_required' : 'err_locked'), 'error');
+						toast(t('err_locked'), 'error');
 						if (alive) {
 							refreshBootstrap().catch(function () {}).then(render);
 						}
-					} else if (e && e.code === 'not_authenticated') {
+						return;
+					}
+					dirty = true;
+					if (e && e.code === 'not_authenticated') {
 						handleError(e);
 					} else if (alive) {
 						bar.set('failed', errMessage(e));
@@ -2209,7 +2199,7 @@
 			},
 		}, [
 			picker.node,
-			dayStatus(date, locked, guarded, unlock, 'kitchen', leave),
+			dayStatus(date, lock, leave),
 			people.length && !readOnly ? bar.node : null,
 			poolLine,
 			table,
@@ -2282,7 +2272,7 @@
 		const kitchenSide = 'kitchen' === side();
 		// Each side lists (and adds to) its own teams.
 		const teams = kitchenSide ? KITCHEN_TEAMS : ['server'];
-		const list = S.servers.filter(function (x) { return teams.indexOf(teamOf(x)) >= 0; });
+		const list = kitchenSide ? kitchenStaff() : serverStaff();
 		const nameInput = el('input', { type: 'text', maxlength: C.MAX_NAME_LENGTH, placeholder: t('serverNamePlaceholder'), autocomplete: 'off', 'aria-label': t('serverNamePlaceholder') });
 		const addBtn = el('button', { type: 'submit', class: 'btn primary' }, t('addServer'));
 		// The kitchen side picks sushi bar or kitchen; the servers' side only adds servers.
@@ -2387,9 +2377,11 @@
 			] : null;
 		}) : el('ul', { class: 'server-list' }, list.map(row));
 
-		let help = kitchenSide ? 'kitchenStaffHelp' : 'staffHelp';
+		let help = 'staffHelp';
 		if (admin) {
 			help = 'staffHelpAdmin';
+		} else if (kitchenSide) {
+			help = 'kitchenStaffHelp';
 		}
 		return el('section', { class: 'card narrow' }, [
 			el('h2', { text: kitchenSide ? t('kitchenStaffTitle') : t('staffTitle') }),

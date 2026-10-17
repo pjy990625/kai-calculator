@@ -364,8 +364,7 @@ $$;
 
 -- Can this role add or change the record of p_date right now?
 -- Staff (servers): the last 7 days (see staff_edit_from). Older days are closed and only
--- the admin can change them. A past day also needs the name of the person
--- changing it (see save_shifts), which the app asks for when "Edit" is tapped.
+-- the admin can change them. In the app a past day opens read-only until "Edit" is tapped.
 drop function if exists private.can_edit(text, date, timestamptz); -- older signature
 create or replace function private.can_edit(p_role text, p_date date)
 returns boolean
@@ -381,22 +380,7 @@ as $$
 	end;
 $$;
 
--- Can this role change the kitchen and sushi bar hours of p_date right now?
--- The kitchen login: the same 7 days as servers' tips (a past day also needs
--- the name of who is changing it, see save_kitchen_hours). The admin: any day.
-create or replace function private.can_edit_kitchen(p_role text, p_date date)
-returns boolean
-language sql
-stable
-set search_path = ''
-as $$
-	select case
-		when p_date is null or p_date < private.retention_start() or p_date > private.today() then false
-		when p_role = 'admin' then true
-		when p_role = 'kitchen' then p_date >= private.staff_edit_from()
-		else false
-	end;
-$$;
+drop function if exists private.can_edit_kitchen(text, date); -- now inside save_kitchen_hours
 
 -- Checks a list of hours for ONE shift (or one day of the kitchen):
 --   [{"server_id": "...", "hundredths": 550}, ...]   (550 = 5.5 h)
@@ -952,11 +936,12 @@ begin
 	if p_date < private.retention_start() then
 		perform private.fail('too_old');
 	end if;
-	if not private.can_edit_kitchen(v_role, p_date) then
+	-- The kitchen login: the same 7 days as servers' tips. The admin: any day.
+	if v_role = 'kitchen' and p_date < private.staff_edit_from() then
 		perform private.fail('locked');
 	end if;
 	if p_editor is not null then
-		select s.name into v_editor from private.servers s where s.id = p_editor and s.team in ('kitchen', 'sushi');
+		select s.name into v_editor from private.servers s where s.id = p_editor and private.sees_team(v_role, s.team);
 	end if;
 	perform private.check_hours(p_hours, array['kitchen', 'sushi']);
 
