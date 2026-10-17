@@ -19,6 +19,7 @@
 	const API = window.KaiApi;
 	const TOKEN_KEY = 'kai-calculator:token';
 	const LANG_KEY = 'kai-calculator:lang';
+	const SIDE_KEY = 'kai-calculator:side';
 
 	const S = {
 		token: null,
@@ -28,17 +29,17 @@
 		staffEditFrom: null, // oldest date staff can change (the database decides; 7 days)
 		settings: null,
 		servers: [],
+		side: 'server', // admin: which side the tabs show, 'server' | 'kitchen' (see side())
 		tab: 'entry',
 		entryDate: null,
 		entryShift: 'day', // which tab of the daily entry card is open: 'day' | 'night' | 'sum'
 		entryShiftDate: null, // the date entryShift was chosen for
-		unlock: null, // { date, editorId, name }: a past date opened with "Edit" (see renderDayForm)
+		unlock: null, // { date, side, editorId, name }: a past date opened with "Edit" (see unlockBox)
 		reportKind: 'period', // 'period' | 'month'
 		reportDate: null,
 		personId: null, // set: Reports shows this server's hours day by day
-		kitchenView: 'report', // admin, Kitchen tab: 'hours' (enter from the paper sheet) | 'report'
-		kitchenDate: null, // the date the kitchen hours form shows
-		kitchenPersonId: null, // set: the Kitchen tab shows this person's hours day by day
+		kitchenDate: null, // the date the kitchen's Daily entry shows
+		kitchenPersonId: null, // set: the kitchen's Reports shows this person's hours day by day
 	};
 	let lang = 'en';
 	let renderSeq = 0;
@@ -339,13 +340,19 @@
 		return S.servers.filter(function (x) { return 'server' !== teamOf(x); });
 	}
 
-	/** The main tabs each login has (settings is the gear button). */
-	function tabsFor(role) {
-		if ('kitchen' === role) {
-			return ['kitchen'];
+	/**
+	 * Which side the tabs show: 'server' | 'kitchen'. Each login has its own
+	 * side; the admin switches between the two at the top.
+	 */
+	function side() {
+		if (isKitchenLogin()) {
+			return 'kitchen';
 		}
-		return 'admin' === role ? ['entry', 'report', 'kitchen', 'staff'] : ['entry', 'report', 'staff'];
+		return isAdmin() && 'kitchen' === S.side ? 'kitchen' : 'server';
 	}
+
+	/** The main tabs, the same on both sides (settings is the gear button). */
+	const MAIN_TABS = ['entry', 'report', 'staff'];
 
 	/* ------------------------------------------------------------------ */
 	/* Session                                                             */
@@ -366,8 +373,8 @@
 		S.staffEditFrom = b.staff_edit_from || b.today; // older database: today only
 		S.settings = b.settings;
 		S.servers = C.sortServers(b.servers || []); // always alphabetical
-		if ('settings' !== S.tab && tabsFor(S.role).indexOf(S.tab) < 0) {
-			S.tab = tabsFor(S.role)[0]; // e.g. the kitchen login opens on the Kitchen tab
+		if ('settings' !== S.tab && MAIN_TABS.indexOf(S.tab) < 0) {
+			S.tab = MAIN_TABS[0];
 		}
 		if (!S.kitchenDate) {
 			S.kitchenDate = S.today;
@@ -383,6 +390,7 @@
 
 	async function boot() {
 		lang = lsGet(LANG_KEY) || I.detect();
+		S.side = 'kitchen' === lsGet(SIDE_KEY) ? 'kitchen' : 'server'; // the admin's last side
 		document.documentElement.lang = lang;
 		if (!API.configured()) {
 			renderSetupNeeded();
@@ -476,12 +484,30 @@
 			]);
 		}
 		const tabs = document.getElementById('tabs');
+		const sides = document.getElementById('side-switch'); // missing in an older cached page
+		if (sides) {
+			// The admin: Servers | Kitchen & sushi bar, above the tabs.
+			sides.replaceChildren(isAdmin() ? segmented([
+				{ value: 'server', label: t('sideServers') },
+				{ value: 'kitchen', label: t('sideKitchen') },
+			], side(), function (v) {
+				S.side = v;
+				lsSet(SIDE_KEY, v);
+				if ('settings' === S.tab) {
+					S.tab = 'entry';
+				}
+				S.personId = null;
+				S.kitchenPersonId = null;
+				render();
+			}) : '');
+			sides.hidden = !isAdmin();
+		}
 		if (!S.role) {
 			tabs.replaceChildren();
 			return;
 		}
-		const labels = { entry: t('tabEntry'), report: t('tabReport'), kitchen: t('tabKitchen'), staff: isAdmin() ? t('tabPeople') : t('tabStaff') };
-		tabs.replaceChildren.apply(tabs, tabsFor(S.role).map(function (k) {
+		const labels = { entry: t('tabEntry'), report: t('tabReport'), staff: 'kitchen' === side() ? t('tabPeople') : t('tabStaff') };
+		tabs.replaceChildren.apply(tabs, MAIN_TABS.map(function (k) {
 			return [k, labels[k]];
 		}).map(function (tb) {
 			const on = S.tab === tb[0];
@@ -521,14 +547,19 @@
 		}
 		renderShell();
 		const seq = ++renderSeq;
+		const kitchen = 'kitchen' === side();
 		if ('report' === S.tab) {
-			renderReportTab(seq);
-		} else if ('kitchen' === S.tab) {
-			renderKitchenTab(seq);
+			if (kitchen) {
+				renderKitchenTab(seq);
+			} else {
+				renderReportTab(seq);
+			}
 		} else if ('staff' === S.tab) {
 			setMain(renderStaffTab());
 		} else if ('settings' === S.tab) {
 			setMain(renderSettingsTab());
+		} else if (kitchen) {
+			renderKitchenEntry(seq);
 		} else {
 			renderEntryTab(seq);
 		}
@@ -627,7 +658,7 @@
 				S.token = r.token;
 				lsSet(TOKEN_KEY, r.token);
 				input.value = '';
-				S.tab = 'entry'; // the kitchen login moves to its tab (refreshBootstrap)
+				S.tab = 'entry';
 				S.entryDate = null;
 				S.reportDate = null;
 				S.personId = null;
@@ -710,14 +741,34 @@
 		return editable ? null : t('lockClosed');
 	}
 
+	/** Kitchen hours: why the date can't be edited (null = editable). Same 7 days as the servers. */
+	function kitchenLockReason(date) {
+		if (date > S.today) {
+			return t('lockFuture');
+		}
+		if (S.retentionStart && date < S.retentionStart) {
+			return t('lockTooOld', { months: S.settings.retention_months });
+		}
+		return isAdmin() || date >= S.staffEditFrom ? null : t('lockClosed');
+	}
+
+	/** The "Edit" of a past day still holds for this date and side (else it is dropped). */
+	function unlockFor(date, sideName) {
+		if (S.unlock && (S.unlock.date !== date || (S.unlock.side || 'server') !== sideName)) {
+			S.unlock = null;
+		}
+		return S.unlock;
+	}
+
 	/**
-	 * A past day, read-only: pick who is changing it (staff share one PIN, so the
-	 * audit log needs a name), confirm, and the form opens for editing.
+	 * A past day, read-only: pick who is changing it (a login is shared by
+	 * many people, so the audit log needs a name), confirm, and the form opens
+	 * for editing. `people`: the names to pick from.
 	 */
-	function unlockBox(date) {
+	function unlockBox(date, people, sideName) {
 		const admin = isAdmin();
 		const who = admin ? null : el('select', { 'aria-label': t('whoEdits') }, [el('option', { value: '', text: t('pickName') })]
-			.concat(serverStaff().filter(function (s) { return s.active; }).map(function (s) {
+			.concat(people.filter(function (s) { return s.active; }).map(function (s) {
 				return el('option', { value: s.id, text: s.name });
 			})));
 		const error = el('p', { class: 'unlock-error', role: 'alert', hidden: true });
@@ -733,7 +784,7 @@
 				return;
 			}
 			const server = S.servers.find(function (s) { return s.id === id; });
-			S.unlock = { date: date, editorId: id || null, name: server ? server.name : t('roleAdmin') };
+			S.unlock = { date: date, side: sideName, editorId: id || null, name: server ? server.name : t('roleAdmin') };
 			render();
 		}
 		return el('div', { class: 'notice lock unlock-box' }, [
@@ -743,6 +794,32 @@
 				el('button', { type: 'button', class: 'btn primary small', onclick: onEdit }, t('editPast')),
 			]),
 			error,
+		]);
+	}
+
+	/**
+	 * The line under the date: why it is locked, the Edit box of a past day,
+	 * or who is changing it (with Done). `leave` saves what was typed first.
+	 */
+	function dayStatus(date, locked, guarded, unlock, people, sideName, leave) {
+		if (locked) {
+			return el('p', { class: 'notice lock', text: '🔒 ' + locked });
+		}
+		if (guarded) {
+			return unlockBox(date, people, sideName);
+		}
+		if (!unlock) {
+			return null;
+		}
+		return el('div', { class: 'notice edit-on row' }, [
+			el('span', { text: '✏ ' + t('editingPast', { name: unlock.name }) }),
+			el('button', { type: 'button', class: 'btn small', onclick: function () {
+				// Save what was typed, then lock the day again.
+				const r = leave();
+				if (r !== false) {
+					Promise.resolve(r).then(function () { S.unlock = null; render(); });
+				}
+			} }, t('editDone')),
 		]);
 	}
 
@@ -759,10 +836,7 @@
 		const locked = lockReason(date, rec);
 		// A past day opens read-only so it can't be changed by a stray tap. "Edit" (with the
 		// name of who is changing it, for the audit log) opens it until another date is picked.
-		if (S.unlock && S.unlock.date !== date) {
-			S.unlock = null;
-		}
-		const unlock = S.unlock;
+		const unlock = unlockFor(date, 'server');
 		const guarded = !locked && date < S.today && !unlock;
 		const readOnly = !!locked || guarded;
 		const pct = S.settings.server_pct;
@@ -1179,21 +1253,7 @@
 			el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')),
 		]) : el('div', { hidden: true });
 
-		let status = locked ? el('p', { class: 'notice lock', text: '🔒 ' + locked }) : null;
-		if (guarded) {
-			status = unlockBox(date);
-		} else if (unlock) {
-			status = el('div', { class: 'notice edit-on row' }, [
-				el('span', { text: '✏ ' + t('editingPast', { name: unlock.name }) }),
-				el('button', { type: 'button', class: 'btn small', onclick: function () {
-					// Save what was typed, then lock the day again.
-					const r = leave();
-					if (r !== false) {
-						Promise.resolve(r).then(function () { S.unlock = null; render(); });
-					}
-				} }, t('editDone')),
-			]);
-		}
+		const status = dayStatus(date, locked, guarded, unlock, serverStaff(), 'server', leave);
 
 		// The two tabs. Both panels stay in the page (one hidden), so switching
 		// tabs never throws away what was typed.
@@ -1260,6 +1320,7 @@
 			flush: saveNow,
 			leave: leave,
 			restore: function () {
+				S.side = 'server';
 				S.tab = 'entry';
 				S.entryDate = date;
 			},
@@ -1704,36 +1765,24 @@
 		return el('tr', { class: 'group-row' }, el('th', { colspan: cols, text: teamLabel(team) }));
 	}
 
+	/** The kitchen's Daily entry: one date's hours. */
+	function renderKitchenEntry(seq) {
+		const date = S.kitchenDate || S.today;
+		loadRange(seq, date, date, function (range) {
+			return kitchenHoursForm(date, calcInput(range));
+		});
+	}
+
+	/** The kitchen's Reports. */
 	function renderKitchenTab(seq) {
 		if (S.kitchenPersonId) {
 			renderKitchenPerson(seq);
-			return;
-		}
-		if (isAdmin() && 'hours' === S.kitchenView) {
-			const date = S.kitchenDate || S.today;
-			loadRange(seq, date, date, function (range) {
-				return kitchenHoursForm(date, calcInput(range));
-			});
 			return;
 		}
 		const r = rangeFor(S.reportKind, S.reportDate);
 		loadRange(seq, r.from, r.to, function (range) {
 			return kitchenReport(C.summarizeKitchen(calcInput(range), r.from, r.to), r);
 		});
-	}
-
-	/** Admin: Enter hours | Report. */
-	function kitchenSwitch() {
-		if (!isAdmin()) {
-			return null;
-		}
-		return el('div', { class: 'row kitchen-switch no-print' }, segmented([
-			{ value: 'hours', label: t('kitchenHoursView') },
-			{ value: 'report', label: t('kitchenReportView') },
-		], S.kitchenView, function (v) {
-			S.kitchenView = v;
-			render();
-		}));
 	}
 
 	function openKitchenPerson(id, date) {
@@ -1745,9 +1794,9 @@
 		window.scrollTo(0, 0);
 	}
 
-	/** Admin: a date in the kitchen report → its hours form. */
+	/** A date in the kitchen's Reports → that day in its Daily entry. */
 	function openKitchenDay(date) {
-		S.kitchenView = 'hours';
+		S.tab = 'entry';
 		S.kitchenDate = date;
 		render();
 		window.scrollTo(0, 0);
@@ -1759,7 +1808,6 @@
 		const kitchenPct = 100 - s.serverPct;
 		const title = 'month' === kind ? monthLabel(s.from.slice(0, 7)) : rangeLabel(s.from, s.to);
 		const parts = [
-			kitchenSwitch(),
 			el('header', { class: 'report-head print-only' }, [
 				S.settings.restaurant_name ? el('p', { class: 'eyebrow', text: S.settings.restaurant_name }) : null,
 				el('h2', { text: t('kitchenTitle') + ' · ' + title }),
@@ -1786,11 +1834,10 @@
 				}
 				return;
 			}
-			const text = t(isAdmin() ? 'warnNoKitchenHoursAdmin' : 'warnNoKitchenHours', { date: niceDate(w.date, true), amount: money(w.cents) });
-			parts.push(el('div', { class: 'notice warn' }, isAdmin() ? [
-				text + ' ',
-				el('button', { type: 'button', class: 'btn small no-print', onclick: function () { openKitchenDay(w.date); } }, t('kitchenHoursView')),
-			] : text));
+			parts.push(el('div', { class: 'notice warn' }, [
+				t('warnNoKitchenHours', { date: niceDate(w.date, true), amount: money(w.cents) }) + ' ',
+				el('button', { type: 'button', class: 'btn small no-print', onclick: function () { openKitchenDay(w.date); } }, t('enterHours')),
+			]));
 		});
 
 		parts.push(el('h3', { class: 'section-title', text: t('perPersonTitle') }));
@@ -1822,9 +1869,7 @@
 
 		if (s.days.length) {
 			parts.push(el('h3', { class: 'section-title', text: t('perDayTitle') }));
-			if (isAdmin()) {
-				parts.push(el('p', { class: 'muted small no-print', text: t('kitchenPerDayHelp') }));
-			}
+			parts.push(el('p', { class: 'muted small no-print', text: t('kitchenPerDayHelp') }));
 			parts.push(el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
 				el('thead', null, el('tr', null, [
 					el('th', { text: t('date') }),
@@ -1847,10 +1892,10 @@
 						left = money(d.leftover);
 					}
 					return el('tr', null, [
-						el('td', { class: 'name' }, isAdmin() ? el('button', {
+						el('td', { class: 'name' }, el('button', {
 							type: 'button', class: 'link', title: t('openKitchenDay', { date: label }),
 							onclick: function () { openKitchenDay(d.date); },
-						}, label) : label),
+						}, label)),
 						el('td', { class: 'num strong', text: total }),
 						el('td', { class: 'num', text: d.hasTips ? money(d.kitchen) + (d.final ? '' : ' *') : '—' }),
 						el('td', { class: 'num', text: d.hours ? C.formatHours(d.hours) : '—' }),
@@ -1928,7 +1973,7 @@
 				el('div', { class: 'row back-row' }, el('button', {
 					type: 'button', class: 'btn ghost',
 					onclick: function () { S.kitchenPersonId = null; render(); window.scrollTo(0, 0); },
-				}, t('backToKitchen'))),
+				}, t('backToReports'))),
 				picker,
 				el('div', { class: 'range-bar' }, rangeControls(kind, r,
 					function (v) { S.reportKind = v; render(); },
@@ -1964,12 +2009,19 @@
 	}
 
 	/**
-	 * Admin: the kitchen and sushi bar hours of one date, from the paper sheet.
+	 * The kitchen's Daily entry: the kitchen and sushi bar hours of one date,
+	 * next to that day's total tips (from the servers' entry, read-only).
 	 * Saves itself like the daily tips (see saveBar / markField): the whole
 	 * date is sent each time, so it is always exactly what is on screen.
+	 * Locks like the daily tips too: 7 days for the kitchen login, and a past
+	 * day opens read-only until Edit is tapped (with a name, for the audit log).
 	 */
 	function kitchenHoursForm(date, input) {
 		const pct = S.settings.server_pct;
+		const locked = kitchenLockReason(date);
+		const unlock = unlockFor(date, 'kitchen');
+		const guarded = !locked && date < S.today && !unlock;
+		const readOnly = !!locked || guarded;
 		const saved = {};
 		input.kitchenHours.forEach(function (h) {
 			if (h.date === date) {
@@ -2062,7 +2114,13 @@
 			dirty = false;
 			bar.set('saving');
 			const sentEdits = new Map(edits);
-			inFlight = API.rpc('save_kitchen_hours', { p_token: S.token, p_date: date, p_hours: f.hours }, { keepalive: !!keepalive })
+			inFlight = API.rpc('save_kitchen_hours', {
+				p_token: S.token,
+				p_date: date,
+				p_hours: f.hours,
+				// Only for a past day (older databases don't know this argument).
+				p_editor: unlock && unlock.editorId ? unlock.editorId : undefined,
+			}, { keepalive: !!keepalive })
 				.then(function () {
 					sentEdits.forEach(function (n, field) {
 						if (edits.get(field) === n) {
@@ -2075,7 +2133,15 @@
 					}
 				}, function (e) {
 					dirty = true;
-					if (e && e.code === 'not_authenticated') {
+					if (e && ('locked' === e.code || 'editor_required' === e.code)) {
+						// Midnight passed: the day is closed, or now needs "Edit" first.
+						dirty = false;
+						again = false;
+						toast(t('editor_required' === e.code ? 'err_editor_required' : 'err_locked'), 'error');
+						if (alive) {
+							refreshBootstrap().catch(function () {}).then(render);
+						}
+					} else if (e && e.code === 'not_authenticated') {
 						handleError(e);
 					} else if (alive) {
 						bar.set('failed', errMessage(e));
@@ -2142,7 +2208,7 @@
 					fields[p.id] = el('input', {
 						type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0',
 						'aria-label': p.name + ' ' + t('hours'),
-						value: saved[p.id] ? C.formatHours(saved[p.id]) : '', oninput: onInput,
+						value: saved[p.id] ? C.formatHours(saved[p.id]) : '', disabled: readOnly, oninput: onInput,
 					});
 					shareCells[p.id] = el('td', { class: 'num share' }, '—');
 					return el('tr', null, [
@@ -2166,13 +2232,13 @@
 				saveNow();
 			},
 		}, [
-			kitchenSwitch(),
 			picker.node,
-			people.length ? bar.node : null,
+			dayStatus(date, locked, guarded, unlock, kitchenStaff(), 'kitchen', leave),
+			people.length && !readOnly ? bar.node : null,
 			poolLine,
 			table,
 			leftoverLine,
-			people.length ? el('p', { class: 'muted small', text: t('kitchenHoursHelp') }) : null,
+			people.length && !readOnly ? el('p', { class: 'muted small', text: t('kitchenHoursHelp') }) : null,
 		]);
 		// Leaving a field saves it right away (no need to wait 1.5 s).
 		form.addEventListener('focusout', function () {
@@ -2180,14 +2246,13 @@
 				saveNow();
 			}
 		});
-		entryForm = {
+		entryForm = readOnly ? null : {
 			flush: saveNow,
 			leave: leave,
 			restore: function () {
-				S.tab = 'kitchen';
-				S.kitchenView = 'hours';
+				S.side = 'kitchen';
+				S.tab = 'entry';
 				S.kitchenDate = date;
-				S.kitchenPersonId = null;
 			},
 			unsaved: function () { return dirty; },
 		};
@@ -2238,10 +2303,14 @@
 
 	function renderStaffTab() {
 		const admin = isAdmin();
+		const kitchenSide = 'kitchen' === side();
+		// Each side lists (and adds to) its own teams.
+		const teams = kitchenSide ? KITCHEN_TEAMS : ['server'];
+		const list = S.servers.filter(function (x) { return teams.indexOf(teamOf(x)) >= 0; });
 		const nameInput = el('input', { type: 'text', maxlength: C.MAX_NAME_LENGTH, placeholder: t('serverNamePlaceholder'), autocomplete: 'off', 'aria-label': t('serverNamePlaceholder') });
 		const addBtn = el('button', { type: 'submit', class: 'btn primary' }, t('addServer'));
-		// The admin picks the team; servers can only add servers.
-		const teamInput = admin ? el('select', { 'aria-label': t('team') }, TEAMS.map(function (team) {
+		// The kitchen side picks sushi bar or kitchen; the servers' side only adds servers.
+		const teamInput = teams.length > 1 ? el('select', { 'aria-label': t('team') }, teams.map(function (team) {
 			return el('option', { value: team }, teamLabel(team));
 		})) : null;
 
@@ -2252,11 +2321,11 @@
 				toast(t('err_invalid_name'), 'error');
 				return;
 			}
+			const team = teamInput ? teamInput.value : 'server';
 			const args = { p_name: name };
 			if (teamInput) {
-				args.p_team = teamInput.value;
+				args.p_team = team; // servers: left out (older databases don't know it)
 			}
-			const team = teamInput ? teamInput.value : 'server';
 			const added = await serverAction('add_server', args, addBtn);
 			if (added) {
 				const again = document.querySelector('.add-server input');
@@ -2305,7 +2374,8 @@
 							const to = e.target.value;
 							serverAction('set_server_team', { p_id: s.id, p_team: to }, e.currentTarget).then(function (ok) {
 								if (ok) {
-									showServerRow(s.id); // it moved to another group
+									toast(t('movedTeam', { name: s.name, team: teamLabel(to) }));
+									showServerRow(s.id); // it moved to another group (or to the other side)
 								} else {
 									e.target.value = teamOf(s);
 								}
@@ -2332,20 +2402,24 @@
 			]);
 		}
 
-		// The admin sees everyone, in one group per team; servers see only servers.
-		const groups = admin ? TEAMS.map(function (team) {
-			const people = S.servers.filter(function (x) { return teamOf(x) === team; });
+		// The kitchen side: one group per team; the servers' side: one list.
+		const groups = kitchenSide ? KITCHEN_TEAMS.map(function (team) {
+			const people = list.filter(function (x) { return teamOf(x) === team; });
 			return people.length ? [
 				el('h3', { class: 'section-title', text: teamLabel(team) + ' (' + people.length + ')' }),
 				el('ul', { class: 'server-list' }, people.map(row)),
 			] : null;
-		}) : (S.servers.length ? el('ul', { class: 'server-list' }, S.servers.map(row)) : null);
+		}) : el('ul', { class: 'server-list' }, list.map(row));
 
+		let help = kitchenSide ? 'kitchenStaffHelp' : 'staffHelp';
+		if (admin) {
+			help = 'staffHelpAdmin';
+		}
 		return el('section', { class: 'card narrow' }, [
-			el('h2', { text: admin ? t('peopleTitle') : t('staffTitle') }),
-			el('p', { class: 'muted', text: admin ? t('staffHelpAdmin') : t('staffHelp') }),
+			el('h2', { text: kitchenSide ? t('kitchenStaffTitle') : t('staffTitle') }),
+			el('p', { class: 'muted', text: t(help) }),
 			el('form', { class: 'row add-server', onsubmit: onAdd }, [nameInput, teamInput, addBtn]),
-			S.servers.length ? groups : el('p', { class: 'muted', text: t('noServersYet') }),
+			list.length ? groups : el('p', { class: 'muted', text: kitchenSide ? t('noKitchenStaffYet') : t('noServersYet') }),
 		]);
 	}
 

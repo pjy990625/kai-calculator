@@ -182,7 +182,7 @@ set role anon;
 select test.ok((public.delete_day(:'admin_token', :'today'::date - 1))->>'ok' = 'true', 'admin deletes a closed day');
 select test.ok(test.err(format('select public.delete_day(%L, %L::date - 1)', :'admin_token', :'today')) = 'not_found', 'already deleted');
 
-\echo '-- kitchen: own PIN, own data; the admin enters the hours'
+\echo '-- kitchen: own PIN, own data, own hours'
 reset role;
 select test.ok(test.err($$select private.set_password('kitchen', '2468')$$) like '%must be different%', 'kitchen PIN cannot equal the servers'' PIN');
 select test.ok(test.err($$select private.set_password('kitchen', 'admin-pass-1')$$) like '%must be different%', 'kitchen PIN cannot equal the admin password');
@@ -191,7 +191,7 @@ set role anon;
 select (public.login('1357'))->>'token' as kitchen_token \gset
 select test.ok((public.get_bootstrap(:'kitchen_token'))->>'role' = 'kitchen', 'kitchen PIN gives the kitchen role');
 select test.ok(test.err(format('select public.add_server(%L, %L, %L)', :'staff_token', 'Chad', 'kitchen')) = 'admin_only', 'servers cannot add kitchen staff');
-select test.ok(test.err(format('select public.add_server(%L, %L)', :'kitchen_token', 'Someone')) = 'admin_only', 'the kitchen login cannot add anyone');
+select test.ok(test.err(format('select public.add_server(%L, %L)', :'kitchen_token', 'Someone')) = 'admin_only', 'the kitchen login cannot add servers');
 select test.ok(test.err(format('select public.add_server(%L, %L, %L)', :'admin_token', 'X', 'bar')) = 'invalid_team', 'unknown team rejected');
 select (public.add_server(:'admin_token', 'Chad', 'kitchen'))->>'id' as chad \gset
 select (public.add_server(:'admin_token', 'Ryan', 'sushi'))->>'id' as ryan \gset
@@ -199,9 +199,23 @@ select test.ok((public.add_server(:'staff_token', 'Dana'))->>'team' = 'server', 
 select test.ok((select bool_and(x->>'team' = 'server') and count(*) > 0 from json_array_elements((public.get_bootstrap(:'staff_token'))->'servers') x), 'servers see only servers');
 select test.ok((select bool_and(x->>'team' in ('kitchen', 'sushi')) and count(*) = 2 from json_array_elements((public.get_bootstrap(:'kitchen_token'))->'servers') x), 'the kitchen sees only the kitchen and sushi bar');
 select test.ok((select count(*) >= 5 from json_array_elements((public.get_bootstrap(:'admin_token'))->'servers') x), 'the admin sees everyone');
+select test.ok((public.add_server(:'kitchen_token', 'Owen', 'sushi'))->>'team' = 'sushi', 'the kitchen login adds sushi bar staff');
+select test.ok(test.err(format('select public.add_server(%L, %L, %L)', :'kitchen_token', 'Someone', 'server')) = 'admin_only', 'the kitchen login cannot add a server');
+reset role;
+delete from private.servers where name = 'Owen';
+set role anon;
 
 select format('[{"server_id":"%s","hundredths":950},{"server_id":"%s","hundredths":800}]', :'chad', :'ryan') as k_hours \gset
-select test.ok(test.err(format('select public.save_kitchen_hours(%L, %L::date, %L::jsonb)', :'kitchen_token', :'today', :'k_hours')) = 'admin_only', 'the kitchen login cannot enter hours');
+select test.ok((public.save_kitchen_hours(:'kitchen_token', :'today'::date, :'k_hours'::jsonb))->>'ok' = 'true', 'the kitchen login enters today''s hours');
+select test.ok(test.err(format('select public.save_kitchen_hours(%L, %L::date - 1, %L::jsonb)', :'kitchen_token', :'today', :'k_hours')) = 'editor_required', 'kitchen: a past day needs who is changing it');
+select test.ok(test.err(format('select public.save_kitchen_hours(%L, %L::date - 1, %L::jsonb, %L)', :'kitchen_token', :'today', :'k_hours', :'bob')) = 'editor_required', 'kitchen: a server cannot be the editor');
+select test.ok((public.save_kitchen_hours(:'kitchen_token', :'today'::date - 6, :'k_hours'::jsonb, :'chad'))->>'ok' = 'true', 'kitchen: 6 days ago with a name is open');
+select test.ok(test.err(format('select public.save_kitchen_hours(%L, %L::date - 7, %L::jsonb, %L)', :'kitchen_token', :'today', :'k_hours', :'chad')) = 'locked', 'kitchen: 7 days ago is closed');
+reset role;
+select test.ok((select detail ->> 'past_day' = 'true' and detail -> 'editor' ->> 'name' = 'Chad' and role = 'kitchen'
+	from private.audit_log where action = 'save_kitchen_hours' order by id desc limit 1), 'kitchen past-day edit audited with the name');
+delete from private.kitchen_hours where date = private.today() - 6;
+set role anon;
 select test.ok(test.err(format('select public.save_kitchen_hours(%L, %L::date, %L::jsonb)', :'staff_token', :'today', :'k_hours')) = 'admin_only', 'servers cannot enter kitchen hours');
 select test.ok(test.err(format('select public.save_kitchen_hours(%L, %L::date, %L::jsonb)', :'admin_token', :'today',
 	format('[{"server_id":"%s","hundredths":500}]', :'bob'))) = 'unknown_server', 'a server cannot get kitchen hours');
