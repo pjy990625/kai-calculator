@@ -377,7 +377,24 @@ as $$
 		when p_date is null or p_date < private.retention_start() or p_date > private.today() then false
 		when p_role = 'admin' then true
 		when p_role = 'staff' then p_date >= private.staff_edit_from()
-		else false -- the kitchen login only views
+		else false -- the kitchen login never changes tips
+	end;
+$$;
+
+-- Can this role change the kitchen and sushi bar hours of p_date right now?
+-- The kitchen login: the same 7 days as servers' tips (a past day also needs
+-- the name of who is changing it, see save_kitchen_hours). The admin: any day.
+create or replace function private.can_edit_kitchen(p_role text, p_date date)
+returns boolean
+language sql
+stable
+set search_path = ''
+as $$
+	select case
+		when p_date is null or p_date < private.retention_start() or p_date > private.today() then false
+		when p_role = 'admin' then true
+		when p_role = 'kitchen' then p_date >= private.staff_edit_from()
+		else false
 	end;
 $$;
 
@@ -646,7 +663,7 @@ begin
 		perform private.fail(case when v_existing.date is null then 'date_locked' else 'locked' end);
 	end if;
 	if p_editor is not null then
-		select s.name into v_editor from private.servers s where s.id = p_editor;
+		select s.name into v_editor from private.servers s where s.id = p_editor and private.sees_team(v_role, s.team);
 	end if;
 	if v_past and v_role <> 'admin' and v_editor is null then
 		perform private.fail('editor_required'); -- "Edit" was not tapped (or an old version of the page)
@@ -772,7 +789,8 @@ begin
 end;
 $$;
 
--- Servers can add servers; only the admin adds kitchen and sushi bar staff.
+-- Each login adds people to its own side: servers add servers, the kitchen
+-- login adds kitchen and sushi bar staff, the admin adds anyone.
 drop function if exists public.add_server(text, text); -- older signature
 create or replace function public.add_server(p_token text, p_name text, p_team text default 'server')
 returns json
@@ -786,11 +804,11 @@ declare
 	v_team text := coalesce(p_team, 'server');
 	v_id uuid;
 begin
-	if v_role = 'kitchen' or (v_team <> 'server' and v_role <> 'admin') then
-		perform private.fail('admin_only');
-	end if;
 	if v_team not in ('server', 'kitchen', 'sushi') then
 		perform private.fail('invalid_team');
+	end if;
+	if not private.sees_team(v_role, v_team) then
+		perform private.fail('admin_only');
 	end if;
 	if char_length(v_name) not between 1 and 60 then
 		perform private.fail('invalid_name');
@@ -904,19 +922,29 @@ begin
 end;
 $$;
 
--- Admin: the kitchen and sushi bar hours of one date, from the paper sheet.
--- Replaces all of that date's kitchen hours.
---   p_hours: [{"server_id": "...", "hundredths": 950}, ...]   ([] = nobody)
-create or replace function public.save_kitchen_hours(p_token text, p_date date, p_hours jsonb)
+-- The kitchen and sushi bar hours of one date: the kitchen login (like servers
+-- with their tips) or the admin (from the paper sheet). Replaces all of that
+-- date's kitchen hours.
+--   p_hours:  [{"server_id": "...", "hundredths": 950}, ...]   ([] = nobody)
+--   p_editor: who is changing a past day (a kitchen or sushi bar person). The
+--             kitchen login must give it for any date before today; it goes
+--             into the audit log.
+drop function if exists public.save_kitchen_hours(text, date, jsonb); -- older signature
+create or replace function public.save_kitchen_hours(p_token text, p_date date, p_hours jsonb, p_editor uuid default null)
 returns json
 language plpgsql
 security definer
 set search_path = ''
 as $$
 declare
+	v_role text := private.session_role(p_token);
 	v_before jsonb;
+	v_editor text;
+	v_past boolean := p_date < private.today();
 begin
-	perform private.require_admin(p_token);
+	if v_role not in ('admin', 'kitchen') then
+		perform private.fail('admin_only');
+	end if;
 	if p_date is null then
 		perform private.fail('invalid_date');
 	end if;
@@ -926,7 +954,19 @@ begin
 	if p_date < private.retention_start() then
 		perform private.fail('too_old');
 	end if;
+	if not private.can_edit_kitchen(v_role, p_date) then
+		perform private.fail('locked');
+	end if;
+	if p_editor is not null then
+		select s.name into v_editor from private.servers s where s.id = p_editor and s.team in ('kitchen', 'sushi');
+	end if;
+	if v_past and v_role <> 'admin' and v_editor is null then
+		perform private.fail('editor_required'); -- "Edit" was not tapped
+	end if;
 	perform private.check_hours(p_hours, array['kitchen', 'sushi']);
+
+	-- One save at a time per date (two phones saving at once).
+	perform pg_advisory_xact_lock(hashtext('kitchen_hours'), p_date - date '2000-01-01');
 
 	select jsonb_agg(jsonb_build_object('server_id', k.server_id, 'hundredths', k.hundredths) order by k.server_id)
 	into v_before
@@ -937,8 +977,12 @@ begin
 	select p_date, (e ->> 'server_id')::uuid, (e ->> 'hundredths')::int
 	from jsonb_array_elements(p_hours) e;
 
-	perform private.log('admin', 'save_kitchen_hours', jsonb_build_object(
-		'date', p_date, 'before', coalesce(v_before, '[]'::jsonb), 'after', p_hours));
+	perform private.log(v_role, 'save_kitchen_hours', jsonb_build_object(
+		'date', p_date,
+		'past_day', v_past,
+		'editor', case when v_editor is null then null else jsonb_build_object('id', p_editor, 'name', v_editor) end,
+		'before', coalesce(v_before, '[]'::jsonb),
+		'after', p_hours));
 	perform private.purge();
 	return json_build_object('ok', true, 'date', p_date);
 end;

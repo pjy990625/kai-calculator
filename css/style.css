@@ -275,8 +275,12 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 .badge.on { background: var(--accent-soft); color: var(--accent); }
 .badge.kitchen { background: var(--warn-soft); color: var(--day); }
 
-/* Kitchen tab: admin's Enter hours | Report switch, and team headings inside tables. */
-.kitchen-switch { margin-bottom: 12px; }
+/* Admin: Servers | Kitchen & sushi bar, full width above the tabs. */
+.side-switch { margin-top: 10px; }
+.side-switch .segmented { display: flex; }
+.side-switch .segmented button { flex: 1 1 0; }
+
+/* Team headings inside tables (Sushi bar / Kitchen). */
 .grid .group-row th {
 	background: var(--surface-2); color: var(--muted);
 	font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
