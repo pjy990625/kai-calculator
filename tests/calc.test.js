@@ -325,3 +325,78 @@ test('report rows follow the (alphabetical) server list; removed servers come la
 	}, '2026-10-01', '2026-10-15');
 	assert.deepEqual(s.rows.map((r) => r.name), ['adam', 'Chika', 'Noriko', null]);
 });
+
+test('kitchen + sushi bar: the 40% of the whole day, split by hours across both teams', () => {
+	const staff = C.sortServers([
+		{ id: 'chad', name: 'CHAD', team: 'kitchen' },
+		{ id: 'ryan', name: 'RYAN', team: 'sushi' },
+		{ id: 'sunho', name: 'SUN HO', team: 'kitchen' },
+	]);
+	const kh = (date, staffId, hundredths) => ({ date, staffId, hundredths });
+	const s = C.summarizeKitchen({
+		serverPct: 60,
+		staff,
+		days: [
+			{ date: '2026-10-01', dayTips: 30000, totalTips: 100000 }, // kitchen: 120 + 280 = $400
+			{ date: '2026-10-02', dayTips: 20000, totalTips: null },   // closing not entered, no kitchen hours yet
+			{ date: '2026-10-20', dayTips: 50000, totalTips: 50000 },  // outside the range
+		],
+		kitchenHours: [
+			kh('2026-10-01', 'chad', 800), kh('2026-10-01', 'ryan', 950), kh('2026-10-01', 'sunho', 1000),
+			kh('2026-10-03', 'chad', 400), // hours, no tips entered yet
+			kh('2026-10-20', 'chad', 800),
+		],
+	}, '2026-10-01', '2026-10-15');
+
+	// $400 × 8/27.5 = 116.36, × 9.5/27.5 = 138.18, × 10/27.5 = 145.45 → the spare dollar goes to .45.
+	const d1 = s.days[0];
+	assert.equal(d1.kitchen, 40000);
+	assert.deepEqual(d1.staff.map((x) => [x.name, x.team, x.hours, x.tips]),
+		[['CHAD', 'kitchen', 800, 11600], ['RYAN', 'sushi', 950, 13800], ['SUN HO', 'kitchen', 1000, 14600]]);
+	assert.equal(d1.paid, 40000);
+	assert.equal(d1.leftover, 0);
+	assert.equal(d1.final, true);
+
+	// Tips but no kitchen hours: nothing is lost, it is reported and warned.
+	const d2 = s.days[1];
+	assert.equal(d2.kitchen, 8000); // only the day shift so far
+	assert.equal(d2.unallocated, 8000);
+	assert.equal(d2.final, false);
+	assert.deepEqual(s.warnings, [
+		{ type: 'noKitchenHours', date: '2026-10-02', cents: 8000 },
+		{ type: 'missingTotal', date: '2026-10-02' },
+	]);
+
+	// Hours before the tips are entered: counted, $0 for now.
+	const d3 = s.days[2];
+	assert.equal(d3.date, '2026-10-03');
+	assert.equal(d3.hasTips, false);
+	assert.equal(d3.staff[0].tips, 0);
+
+	assert.equal(s.days.length, 3);
+	assert.deepEqual(s.rows.map((r) => [r.name, r.hours, r.tips]), [['CHAD', 1200, 11600], ['RYAN', 950, 13800], ['SUN HO', 1000, 14600]]);
+	assert.equal(s.totals.tips, 120000);
+	assert.equal(s.totals.kitchen, 48000);
+	assert.equal(s.totals.paid + s.totals.leftover + s.totals.unallocated, s.totals.kitchen);
+	assert.equal(s.totals.hours, 3150);
+	assert.deepEqual(s.personDays.chad.map((x) => [x.date, x.hours, x.tips]), [['2026-10-01', 800, 11600], ['2026-10-03', 400, 0]]);
+});
+
+test('kitchen pool + servers\' pool = all tips, whatever the amounts', () => {
+	for (let i = 0; i < 2000; i++) {
+		const day = Math.floor(Math.random() * 200000);
+		const total = day + Math.floor(Math.random() * 400000);
+		const pct = 1 + Math.floor(Math.random() * 100);
+		const k = C.summarizeKitchen({
+			serverPct: pct, staff: [{ id: 'a', name: 'A', team: 'kitchen' }, { id: 'b', name: 'B', team: 'sushi' }],
+			days: [{ date: '2026-10-01', dayTips: day, totalTips: total }],
+			kitchenHours: [{ date: '2026-10-01', staffId: 'a', hundredths: 25 * (1 + Math.floor(Math.random() * 60)) },
+				{ date: '2026-10-01', staffId: 'b', hundredths: 25 * (1 + Math.floor(Math.random() * 60)) }],
+		}, '2026-10-01', '2026-10-01');
+		const sv = C.summarize({ serverPct: pct, servers: [], days: [{ date: '2026-10-01', dayTips: day, totalTips: total }], hours: [] }, '2026-10-01', '2026-10-01');
+		assert.equal(k.totals.kitchen, sv.totals.kitchen);
+		assert.equal(sv.totals.pool + k.totals.kitchen, total);
+		assert.ok(k.totals.paid <= k.totals.kitchen && k.totals.paid % 100 === 0);
+		assert.ok(k.totals.leftover < 100 * 2); // under $1 unless a tied pair is left
+	}
+});
