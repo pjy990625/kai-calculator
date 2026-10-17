@@ -2,8 +2,12 @@
  * Kai Calculator — UI.
  *
  * Talks to Supabase only through window.KaiApi (js/api.js). All permission
- * rules (PIN, staff can only change today's record, admin-only actions) are
- * enforced by the database; the checks here only decide what to show.
+ * rules (PINs, what servers may change, what the kitchen login may see,
+ * admin-only actions) are enforced by the database; the checks here only
+ * decide what to show.
+ *
+ * Logins: 'staff' = the servers' PIN, 'kitchen' = the kitchen PIN (views the
+ * kitchen and sushi bar only), 'admin' = everything.
  *
  * All user-provided text is inserted with textContent (via el()), never innerHTML.
  */
@@ -32,10 +36,14 @@
 		reportKind: 'period', // 'period' | 'month'
 		reportDate: null,
 		personId: null, // set: Reports shows this server's hours day by day
+		kitchenView: 'report', // admin, Kitchen tab: 'hours' (enter from the paper sheet) | 'report'
+		kitchenDate: null, // the date the kitchen hours form shows
+		kitchenPersonId: null, // set: the Kitchen tab shows this person's hours day by day
 	};
 	let lang = 'en';
 	let renderSeq = 0;
-	// The open entry form ({flush, leave, date, unsaved}), so leaving it can save first.
+	// The open entry form ({flush, leave, restore, unsaved}) — daily tips or kitchen
+	// hours — so leaving it can save first (restore: go back to it).
 	let entryForm = null;
 	const AUTOSAVE_MS = 1500;
 	// Typing that can still become a valid value (see readForm in the daily entry).
@@ -229,7 +237,7 @@
 	}
 
 	function roleLabel(role) {
-		return 'admin' === role ? t('roleAdmin') : t('roleStaff');
+		return 'admin' === role ? t('roleAdmin') : ('kitchen' === role ? t('roleKitchen') : t('roleStaff'));
 	}
 
 	function niceDate(iso, withWeekday) {
@@ -312,6 +320,33 @@
 		return 'admin' === S.role;
 	}
 
+	function isKitchenLogin() {
+		return 'kitchen' === S.role;
+	}
+
+	/** 'server' | 'kitchen' | 'sushi' (rows from an older database have no team: servers). */
+	function teamOf(person) {
+		return person.team || 'server';
+	}
+
+	/** Servers only (the admin's list also has the kitchen and sushi bar). */
+	function serverStaff() {
+		return S.servers.filter(function (x) { return 'server' === teamOf(x); });
+	}
+
+	/** Kitchen and sushi bar (empty for the servers' login). */
+	function kitchenStaff() {
+		return S.servers.filter(function (x) { return 'server' !== teamOf(x); });
+	}
+
+	/** The main tabs each login has (settings is the gear button). */
+	function tabsFor(role) {
+		if ('kitchen' === role) {
+			return ['kitchen'];
+		}
+		return 'admin' === role ? ['entry', 'report', 'kitchen', 'staff'] : ['entry', 'report', 'staff'];
+	}
+
 	/* ------------------------------------------------------------------ */
 	/* Session                                                             */
 	/* ------------------------------------------------------------------ */
@@ -331,6 +366,12 @@
 		S.staffEditFrom = b.staff_edit_from || b.today; // older database: today only
 		S.settings = b.settings;
 		S.servers = C.sortServers(b.servers || []); // always alphabetical
+		if ('settings' !== S.tab && tabsFor(S.role).indexOf(S.tab) < 0) {
+			S.tab = tabsFor(S.role)[0]; // e.g. the kitchen login opens on the Kitchen tab
+		}
+		if (!S.kitchenDate) {
+			S.kitchenDate = S.today;
+		}
 		setTimeout(flushErrors, 0); // signed in and online: send errors saved earlier
 		if (!S.entryDate) {
 			S.entryDate = S.today;
@@ -420,7 +461,7 @@
 		actions.replaceChildren();
 		if (S.role) {
 			appendChildren(actions, [
-				el('span', { class: 'badge ' + (isAdmin() ? 'admin' : 'on'), text: roleLabel(S.role) }),
+				el('span', { class: 'badge ' + (isAdmin() ? 'admin' : (isKitchenLogin() ? 'kitchen' : 'on')), text: roleLabel(S.role) }),
 				el('button', {
 					type: 'button',
 					class: 'icon-btn' + ('settings' === S.tab ? ' is-on' : ''),
@@ -439,11 +480,10 @@
 			tabs.replaceChildren();
 			return;
 		}
-		tabs.replaceChildren.apply(tabs, [
-			['entry', t('tabEntry')],
-			['report', t('tabReport')],
-			['staff', t('tabStaff')],
-		].map(function (tb) {
+		const labels = { entry: t('tabEntry'), report: t('tabReport'), kitchen: t('tabKitchen'), staff: isAdmin() ? t('tabPeople') : t('tabStaff') };
+		tabs.replaceChildren.apply(tabs, tabsFor(S.role).map(function (k) {
+			return [k, labels[k]];
+		}).map(function (tb) {
 			const on = S.tab === tb[0];
 			return el('button', {
 				type: 'button',
@@ -453,6 +493,7 @@
 				onclick: function () {
 					S.tab = tb[0];
 					S.personId = null; // a tab always opens on its main view
+					S.kitchenPersonId = null;
 					render();
 				},
 			}, tb[1]);
@@ -467,8 +508,7 @@
 			const wait = form.leave();
 			if (false === wait) {
 				// The user chose to stay and fix it: put the tab and date back.
-				S.tab = 'entry';
-				S.entryDate = form.date;
+				form.restore();
 				renderShell();
 				return;
 			}
@@ -483,6 +523,8 @@
 		const seq = ++renderSeq;
 		if ('report' === S.tab) {
 			renderReportTab(seq);
+		} else if ('kitchen' === S.tab) {
+			renderKitchenTab(seq);
 		} else if ('staff' === S.tab) {
 			setMain(renderStaffTab());
 		} else if ('settings' === S.tab) {
@@ -527,6 +569,10 @@
 			}),
 			hours: range.hours.map(function (h) {
 				return { date: h.date, serverId: h.server_id, shift: h.shift, hundredths: h.hundredths };
+			}),
+			staff: S.servers,
+			kitchenHours: (range.kitchen_hours || []).map(function (h) { // older database: none
+				return { date: h.date, staffId: h.server_id, hundredths: h.hundredths };
 			}),
 		};
 	}
@@ -581,10 +627,12 @@
 				S.token = r.token;
 				lsSet(TOKEN_KEY, r.token);
 				input.value = '';
-				S.tab = 'entry';
+				S.tab = 'entry'; // the kitchen login moves to its tab (refreshBootstrap)
 				S.entryDate = null;
 				S.reportDate = null;
 				S.personId = null;
+				S.kitchenDate = null;
+				S.kitchenPersonId = null;
 				boot();
 			});
 		}
@@ -596,6 +644,51 @@
 			btn,
 		]));
 		setTimeout(function () { input.focus(); }, 0);
+	}
+
+	/* ------------------------------------------------------------------ */
+	/* Autosave look, shared by the daily tips and the kitchen hours        */
+	/* ------------------------------------------------------------------ */
+
+	/** Each field shows its own state: amber border = typed, not saved yet; green border + ✓ = saved. */
+	function markField(field, state) {
+		field.classList.toggle('is-pending', 'pending' === state);
+		field.classList.toggle('is-saved', 'saved' === state);
+	}
+
+	/**
+	 * The save bar under the header: { node, set(kind, msg) }. Kinds: idle,
+	 * stored, saving, saved, blocked (msg = why), failed (msg = why, with a
+	 * Try again button that calls onRetry).
+	 */
+	function saveBar(onRetry) {
+		const node = el('div', { class: 'save-bar', role: 'status' });
+		let current = '';
+		function set(kind, msg) {
+			if ('saving' === kind && 'saving' === current) {
+				return; // typing: already says "Saving…" (don't re-announce on every key)
+			}
+			current = kind;
+			let text = '';
+			if ('idle' === kind) {
+				text = t('autoIdle');
+			} else if ('stored' === kind) {
+				text = t('autoStored');
+			} else if ('saving' === kind) {
+				text = t('autoSaving');
+			} else if ('saved' === kind) {
+				text = t('autoSaved', { time: niceTime(new Date()) });
+			} else if ('blocked' === kind) {
+				text = t('autoBlocked', { reason: msg });
+			} else if ('failed' === kind) {
+				text = t('autoFailed', { reason: msg }) + ' ';
+			}
+			node.className = 'save-bar ' + kind;
+			node.replaceChildren(el('span', { text: text }), 'failed' === kind
+				? el('button', { type: 'button', class: 'btn small', onclick: onRetry }, t('retry'))
+				: '');
+		}
+		return { node: node, set: set };
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -624,7 +717,7 @@
 	function unlockBox(date) {
 		const admin = isAdmin();
 		const who = admin ? null : el('select', { 'aria-label': t('whoEdits') }, [el('option', { value: '', text: t('pickName') })]
-			.concat(S.servers.filter(function (s) { return s.active; }).map(function (s) {
+			.concat(serverStaff().filter(function (s) { return s.active; }).map(function (s) {
 				return el('option', { value: s.id, text: s.name });
 			})));
 		const error = el('p', { class: 'unlock-error', role: 'alert', hidden: true });
@@ -678,7 +771,7 @@
 			const h = myHours.find(function (x) { return x.serverId === serverId && x.shift === shift; });
 			return h ? C.formatHours(h.hundredths) : '';
 		}
-		const servers = S.servers.filter(function (s) {
+		const servers = serverStaff().filter(function (s) {
 			return s.active || myHours.some(function (h) { return h.serverId === s.id; });
 		});
 
@@ -701,14 +794,9 @@
 			};
 		}
 
-		// Each field shows its own state: amber border = typed, not saved yet;
-		// green border + ✓ = saved. `edits` counts typing per field so a field
-		// changed again while a save is on its way is not marked saved too early.
+		// `edits` counts typing per field so a field changed again while a save
+		// is on its way is not marked saved too early (see markField).
 		const edits = new Map();
-		function markField(field, state) {
-			field.classList.toggle('is-pending', 'pending' === state);
-			field.classList.toggle('is-saved', 'saved' === state);
-		}
 
 		const dayTipsInput = el('input', {
 			id: 'day-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0.00',
@@ -1018,32 +1106,9 @@
 		}
 
 		/** One save bar for both tabs; it stays in view under the header while scrolling. */
-		const statusBar = el('div', { class: 'save-bar', role: 'status' });
-		let statusKind = '';
-		function setStatus(kind, msg) {
-			if ('saving' === kind && 'saving' === statusKind) {
-				return; // typing: already says "Saving…" (don't re-announce on every key)
-			}
-			statusKind = kind;
-			let text = '';
-			if ('idle' === kind) {
-				text = t('autoIdle');
-			} else if ('stored' === kind) {
-				text = t('autoStored');
-			} else if ('saving' === kind) {
-				text = t('autoSaving');
-			} else if ('saved' === kind) {
-				text = t('autoSaved', { time: niceTime(new Date()) });
-			} else if ('blocked' === kind) {
-				text = t('autoBlocked', { reason: msg });
-			} else if ('failed' === kind) {
-				text = t('autoFailed', { reason: msg }) + ' ';
-			}
-			statusBar.className = 'save-bar ' + kind;
-			statusBar.replaceChildren(el('span', { text: text }), 'failed' === kind
-				? el('button', { type: 'button', class: 'btn small', onclick: function () { saveNow(); } }, t('retry'))
-				: '');
-		}
+		const bar = saveBar(function () { saveNow(); });
+		const statusBar = bar.node;
+		const setStatus = bar.set;
 
 		/**
 		 * Leaving this form (another date or tab). Saves what was typed first.
@@ -1194,7 +1259,10 @@
 		entryForm = readOnly ? null : {
 			flush: saveNow,
 			leave: leave,
-			date: date,
+			restore: function () {
+				S.tab = 'entry';
+				S.entryDate = date;
+			},
 			unsaved: isDirty, // typed but not sendable
 		};
 		// Opening a date picks its tab: nothing saved → Day tips; the whole day
@@ -1557,7 +1625,7 @@
 					S.personId = e.target.value;
 					render();
 				},
-			}, S.servers
+			}, serverStaff()
 				.filter(function (x) { return x.active || x.id === id; })
 				.map(function (x) { return el('option', { value: x.id, selected: x.id === id }, x.name); })),
 		]);
@@ -1615,6 +1683,520 @@
 	}
 
 	/* ------------------------------------------------------------------ */
+	/* Kitchen tab — the kitchen and sushi bar (one 40% pool, by hours)    */
+	/* The kitchen login sees only this; the admin also enters the hours.  */
+	/* ------------------------------------------------------------------ */
+
+	const KITCHEN_TEAMS = ['sushi', 'kitchen']; // display order
+
+	/** [{team, list}] for the kitchen teams that have someone in `list` (order kept). */
+	function kitchenGroups(list) {
+		return KITCHEN_TEAMS.map(function (team) {
+			return {
+				team: team,
+				list: list.filter(function (x) { return (x.team || 'kitchen') === team; }), // removed person: kitchen
+			};
+		}).filter(function (g) { return g.list.length; });
+	}
+
+	/** A table section header row ("Sushi bar"). */
+	function groupRow(team, cols) {
+		return el('tr', { class: 'group-row' }, el('th', { colspan: cols, text: teamLabel(team) }));
+	}
+
+	function renderKitchenTab(seq) {
+		if (S.kitchenPersonId) {
+			renderKitchenPerson(seq);
+			return;
+		}
+		if (isAdmin() && 'hours' === S.kitchenView) {
+			const date = S.kitchenDate || S.today;
+			loadRange(seq, date, date, function (range) {
+				return kitchenHoursForm(date, calcInput(range));
+			});
+			return;
+		}
+		const r = rangeFor(S.reportKind, S.reportDate);
+		loadRange(seq, r.from, r.to, function (range) {
+			return kitchenReport(C.summarizeKitchen(calcInput(range), r.from, r.to), r);
+		});
+	}
+
+	/** Admin: Enter hours | Report. */
+	function kitchenSwitch() {
+		if (!isAdmin()) {
+			return null;
+		}
+		return el('div', { class: 'row kitchen-switch no-print' }, segmented([
+			{ value: 'hours', label: t('kitchenHoursView') },
+			{ value: 'report', label: t('kitchenReportView') },
+		], S.kitchenView, function (v) {
+			S.kitchenView = v;
+			render();
+		}));
+	}
+
+	function openKitchenPerson(id, date) {
+		if (date) {
+			S.reportDate = date;
+		}
+		S.kitchenPersonId = id;
+		render();
+		window.scrollTo(0, 0);
+	}
+
+	/** Admin: a date in the kitchen report → its hours form. */
+	function openKitchenDay(date) {
+		S.kitchenView = 'hours';
+		S.kitchenDate = date;
+		render();
+		window.scrollTo(0, 0);
+	}
+
+	function kitchenReport(s, r) {
+		const tot = s.totals;
+		const kind = S.reportKind;
+		const kitchenPct = 100 - s.serverPct;
+		const title = 'month' === kind ? monthLabel(s.from.slice(0, 7)) : rangeLabel(s.from, s.to);
+		const parts = [
+			kitchenSwitch(),
+			el('header', { class: 'report-head print-only' }, [
+				S.settings.restaurant_name ? el('p', { class: 'eyebrow', text: S.settings.restaurant_name }) : null,
+				el('h2', { text: t('kitchenTitle') + ' · ' + title }),
+				'month' === kind ? el('p', { class: 'muted', text: rangeLabel(s.from, s.to) }) : null,
+			]),
+			el('div', { class: 'range-bar no-print' }, rangeControls(kind, r,
+				function (v) { S.reportKind = v; render(); },
+				function (d) { S.reportDate = d; render(); }
+			)),
+			el('div', { class: 'cards' }, [
+				statCard(t('cardTotalTips'), money(tot.tips), ''),
+				statCard(t('cardKitchen', { pct: kitchenPct }), money(tot.kitchen), 'accent'),
+				statCard(t('cardKitchenHours'), C.formatHours(tot.hours), ''),
+				statCard(t('colPerHour'), tot.perHourCents ? money(tot.perHourCents) : '—', ''),
+			]),
+		];
+		if (S.retentionStart && s.from < S.retentionStart) {
+			parts.push(el('div', { class: 'notice warn', text: t('retentionNote', { months: S.settings.retention_months, date: niceDate(S.retentionStart) }) }));
+		}
+		s.warnings.forEach(function (w) {
+			if ('missingTotal' === w.type) {
+				if (w.date !== S.today) { // normal until closing
+					parts.push(el('div', { class: 'notice warn', text: t('warnKitchenNotFinal', { date: niceDate(w.date, true) }) }));
+				}
+				return;
+			}
+			const text = t(isAdmin() ? 'warnNoKitchenHoursAdmin' : 'warnNoKitchenHours', { date: niceDate(w.date, true), amount: money(w.cents) });
+			parts.push(el('div', { class: 'notice warn' }, isAdmin() ? [
+				text + ' ',
+				el('button', { type: 'button', class: 'btn small no-print', onclick: function () { openKitchenDay(w.date); } }, t('kitchenHoursView')),
+			] : text));
+		});
+
+		parts.push(el('h3', { class: 'section-title', text: t('perPersonTitle') }));
+		parts.push(s.rows.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
+			el('thead', null, el('tr', null, [
+				el('th', { text: t('person') }),
+				el('th', { class: 'num', text: t('colTips') }),
+				el('th', { class: 'num', text: t('colHours') }),
+			])),
+			el('tbody', null, kitchenGroups(s.rows).map(function (g) {
+				return [groupRow(g.team, 3)].concat(g.list.map(function (x) {
+					const name = x.name || t('unknownServer');
+					return el('tr', null, [
+						el('td', { class: 'name' }, x.name ? el('button', {
+							type: 'button', class: 'link', title: t('openPerson', { name: name }),
+							onclick: function () { openKitchenPerson(x.id); },
+						}, name) : name),
+						el('td', { class: 'num strong', text: money(x.tips) }),
+						el('td', { class: 'num', text: C.formatHours(x.hours) }),
+					]);
+				}));
+			})),
+			el('tfoot', null, el('tr', null, [
+				el('th', { text: t('total') }),
+				el('th', { class: 'num', text: money(tot.paid) }),
+				el('th', { class: 'num', text: C.formatHours(tot.hours) }),
+			])),
+		])) : el('p', { class: 'muted', text: t('noData') }));
+
+		if (s.days.length) {
+			parts.push(el('h3', { class: 'section-title', text: t('perDayTitle') }));
+			if (isAdmin()) {
+				parts.push(el('p', { class: 'muted small no-print', text: t('kitchenPerDayHelp') }));
+			}
+			parts.push(el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
+				el('thead', null, el('tr', null, [
+					el('th', { text: t('date') }),
+					el('th', { class: 'num', text: t('colTotalTips') }),
+					el('th', { class: 'num', text: t('colKitchen', { pct: kitchenPct }) }),
+					el('th', { class: 'num', text: t('colHours') }),
+					el('th', { class: 'num', text: t('colPerHour') }),
+					el('th', { class: 'num', text: t('colLeftover') }),
+				])),
+				el('tbody', null, s.days.map(function (d) {
+					const label = niceDate(d.date, true);
+					let total = '—';
+					if (d.hasTips) {
+						total = d.final ? money(d.totalTips) : t('missing');
+					}
+					let left = '—';
+					if (d.unallocated) {
+						left = t('notSplit', { amount: money(d.unallocated) });
+					} else if (d.leftover) {
+						left = money(d.leftover);
+					}
+					return el('tr', null, [
+						el('td', { class: 'name' }, isAdmin() ? el('button', {
+							type: 'button', class: 'link', title: t('openKitchenDay', { date: label }),
+							onclick: function () { openKitchenDay(d.date); },
+						}, label) : label),
+						el('td', { class: 'num strong', text: total }),
+						el('td', { class: 'num', text: d.hasTips ? money(d.kitchen) + (d.final ? '' : ' *') : '—' }),
+						el('td', { class: 'num', text: d.hours ? C.formatHours(d.hours) : '—' }),
+						el('td', { class: 'num muted', text: d.perHourCents ? money(d.perHourCents) : '—' }),
+						el('td', { class: 'num muted', text: left }),
+					]);
+				})),
+			])));
+			if (s.days.some(function (d) { return d.hasTips && !d.final; })) {
+				parts.push(el('p', { class: 'muted small', text: t('kitchenNotFinalNote') }));
+			}
+		}
+		parts.push(el('div', { class: 'row actions no-print' }, [
+			el('button', { type: 'button', class: 'btn', onclick: function () { downloadKitchenCsv(s); } }, t('downloadCsv')),
+			el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
+		]));
+		return el('section', { class: 'card report' }, parts);
+	}
+
+	function downloadKitchenCsv(s) {
+		const lines = [];
+		lines.push([t('kitchenTitle'), s.from + ' ~ ' + s.to]);
+		lines.push([t('team'), t('person'), t('colTips'), t('colHours'), t('colPerHour')]);
+		s.rows.forEach(function (r) {
+			lines.push([teamLabel(r.team || 'kitchen'), r.name || t('unknownServer'), C.centsToPlain(r.tips), C.formatHours(r.hours), C.centsToPlain(r.perHourCents)]);
+		});
+		lines.push(['', t('total'), C.centsToPlain(s.totals.paid), C.formatHours(s.totals.hours), C.centsToPlain(s.totals.perHourCents)]);
+		lines.push([]);
+		lines.push([t('date'), t('colTotalTips'), t('colKitchen', { pct: 100 - s.serverPct }), t('colHours'), t('colPerHour'), t('colLeftover'), t('colNotSplit')]);
+		s.days.forEach(function (d) {
+			lines.push([d.date, d.hasTips && d.final ? C.centsToPlain(d.totalTips) : '', C.centsToPlain(d.kitchen), C.formatHours(d.hours),
+				C.centsToPlain(d.perHourCents), C.centsToPlain(d.leftover), C.centsToPlain(d.unallocated)]);
+		});
+		lines.push([t('total'), C.centsToPlain(s.totals.tips), C.centsToPlain(s.totals.kitchen), C.formatHours(s.totals.hours),
+			C.centsToPlain(s.totals.perHourCents), C.centsToPlain(s.totals.leftover), C.centsToPlain(s.totals.unallocated)]);
+		lines.push([]);
+		lines.push([t('perDayStaffTitle')]);
+		lines.push([t('date'), t('team'), t('person'), t('colHours'), t('colTips')]);
+		s.days.forEach(function (d) {
+			d.staff.forEach(function (x) {
+				lines.push([d.date, teamLabel(x.team || 'kitchen'), x.name || t('unknownServer'), C.formatHours(x.hours), C.centsToPlain(x.tips)]);
+			});
+		});
+		downloadCsvFile('kitchen_tips_' + s.from + '_' + s.to + '.csv', lines);
+	}
+
+	/** One kitchen / sushi bar person: totals and their days, for the report's range. */
+	function renderKitchenPerson(seq) {
+		const id = S.kitchenPersonId;
+		const people = kitchenStaff();
+		if (!people.some(function (x) { return x.id === id; })) {
+			S.kitchenPersonId = null; // removed or moved meanwhile
+			render();
+			return;
+		}
+		const picker = el('label', { class: 'field inline' }, [
+			el('span', { text: t('person') }),
+			el('select', {
+				onchange: function (e) {
+					S.kitchenPersonId = e.target.value;
+					render();
+				},
+			}, people
+				.filter(function (x) { return x.active || x.id === id; })
+				.map(function (x) { return el('option', { value: x.id, selected: x.id === id }, x.name); })),
+		]);
+		const kind = S.reportKind;
+		const r = rangeFor(kind, S.reportDate);
+		loadRange(seq, r.from, r.to, function (range) {
+			const s = C.summarizeKitchen(calcInput(range), r.from, r.to);
+			const row = s.rows.find(function (x) { return x.id === id; });
+			const list = s.personDays[id] || [];
+			const pending = list.some(function (d) { return !d.final; });
+			return el('section', { class: 'card person narrow' }, [
+				el('div', { class: 'row back-row' }, el('button', {
+					type: 'button', class: 'btn ghost',
+					onclick: function () { S.kitchenPersonId = null; render(); window.scrollTo(0, 0); },
+				}, t('backToKitchen'))),
+				picker,
+				el('div', { class: 'range-bar' }, rangeControls(kind, r,
+					function (v) { S.reportKind = v; render(); },
+					function (d) { S.reportDate = d; render(); }
+				)),
+				el('div', { class: 'cards three' }, [
+					statCard(t('colHours'), C.formatHours(row ? row.hours : 0), 'accent'),
+					statCard(t('colTips'), money(row ? row.tips : 0), ''),
+					statCard(t('colPerHour'), money(row ? row.perHourCents : 0), ''),
+				]),
+				list.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
+					el('thead', null, el('tr', null, [
+						el('th', { text: t('date') }),
+						el('th', { class: 'num', text: t('colHours') }),
+						el('th', { class: 'num', text: t('colTips') }),
+					])),
+					el('tbody', null, list.map(function (d) {
+						return el('tr', null, [
+							el('td', { class: 'name', text: niceDate(d.date, true) }),
+							el('td', { class: 'num strong', text: C.formatHours(d.hours) }),
+							el('td', { class: 'num', text: money(d.tips) + (d.final ? '' : ' *') }),
+						]);
+					})),
+					el('tfoot', null, el('tr', null, [
+						el('th', { text: t('total') + ' (' + t(1 === list.length ? 'daysCountOne' : 'daysCount', { n: list.length }) + ')' }),
+						el('th', { class: 'num', text: C.formatHours(row ? row.hours : 0) }),
+						el('th', { class: 'num', text: money(row ? row.tips : 0) }),
+					])),
+				])) : el('p', { class: 'muted', text: t('noWorkInRange') }),
+				pending ? el('p', { class: 'muted small', text: t('kitchenNotFinalNote') }) : null,
+			]);
+		});
+	}
+
+	/**
+	 * Admin: the kitchen and sushi bar hours of one date, from the paper sheet.
+	 * Saves itself like the daily tips (see saveBar / markField): the whole
+	 * date is sent each time, so it is always exactly what is on screen.
+	 */
+	function kitchenHoursForm(date, input) {
+		const pct = S.settings.server_pct;
+		const saved = {};
+		input.kitchenHours.forEach(function (h) {
+			if (h.date === date) {
+				saved[h.staffId] = h.hundredths;
+			}
+		});
+		const day = input.days.find(function (d) { return d.date === date; }) || null;
+		const people = kitchenStaff().filter(function (x) { return x.active || saved[x.id]; });
+
+		let timer = null;
+		let inFlight = null;
+		let again = false;
+		let alive = true;
+		let dirty = false;
+		let blocked = null; // why it can't be saved yet
+		const edits = new Map();
+		const fields = {};
+		const shareCells = {};
+		const footHours = el('th', { class: 'num' }, '0');
+		const footShare = el('th', { class: 'num' }, '—');
+		const leftoverLine = el('p', { class: 'split-line' });
+		const bar = saveBar(function () { saveNow(); });
+
+		function read(soft) {
+			const out = { hours: [], bad: [], typing: false };
+			people.forEach(function (p) {
+				const field = fields[p.id];
+				let v = field.value.trim();
+				// Same rule as the daily tips: "2." on the way to 2.25 is not wrong yet.
+				if (soft && field === document.activeElement && v !== '' && C.parseHours(v) === null && UNFINISHED_HOURS.test(v)) {
+					out.typing = true;
+					v = v.replace(/[.,:]\d?$/, '');
+				}
+				const h = v === '' ? 0 : C.parseHours(v);
+				field.classList.toggle('invalid', h === null);
+				if (h === null) {
+					out.bad.push(p.name);
+				} else if (h > 0) {
+					out.hours.push({ server_id: p.id, hundredths: h });
+				}
+			});
+			return out;
+		}
+
+		function update() {
+			const f = read(true);
+			const s = C.summarizeKitchen({
+				serverPct: pct,
+				staff: S.servers,
+				days: day ? [day] : [],
+				kitchenHours: f.hours.map(function (h) { return { date: date, staffId: h.server_id, hundredths: h.hundredths }; }),
+			}, date, date);
+			const d = s.days[0] || null;
+			people.forEach(function (p) {
+				const x = d ? d.staff.find(function (y) { return y.id === p.id; }) : null;
+				shareCells[p.id].replaceChildren(x && x.tips ? el('strong', { text: money(x.tips) }) : '—');
+			});
+			footHours.textContent = C.formatHours(d ? d.hours : 0);
+			footShare.textContent = d && d.hasTips ? money(d.paid) : '—';
+			leftoverLine.textContent = d && d.leftover > 0 ? t('leftoverLine', { amount: money(d.leftover) }) : '';
+		}
+
+		function scheduleSave() {
+			clearTimeout(timer);
+			timer = setTimeout(function () { saveNow(false, true); }, AUTOSAVE_MS);
+			bar.set('saving');
+		}
+
+		function saveNow(keepalive, soft) {
+			clearTimeout(timer);
+			timer = null;
+			if (inFlight) {
+				again = again || dirty;
+				return inFlight;
+			}
+			if (!dirty) {
+				return null;
+			}
+			const f = read(soft);
+			if (f.typing) {
+				timer = setTimeout(function () { saveNow(false, true); }, AUTOSAVE_MS); // leaving the field saves it
+				return null;
+			}
+			if (f.bad.length) {
+				blocked = t('errBadHours', { names: f.bad.join(', ') });
+				bar.set('blocked', blocked);
+				return null;
+			}
+			blocked = null;
+			dirty = false;
+			bar.set('saving');
+			const sentEdits = new Map(edits);
+			inFlight = API.rpc('save_kitchen_hours', { p_token: S.token, p_date: date, p_hours: f.hours }, { keepalive: !!keepalive })
+				.then(function () {
+					sentEdits.forEach(function (n, field) {
+						if (edits.get(field) === n) {
+							edits.delete(field);
+							markField(field, 'saved');
+						}
+					});
+					if (!dirty) {
+						bar.set('saved');
+					}
+				}, function (e) {
+					dirty = true;
+					if (e && e.code === 'not_authenticated') {
+						handleError(e);
+					} else if (alive) {
+						bar.set('failed', errMessage(e));
+					} else {
+						toast(errMessage(e), 'error'); // the form is gone: say so instead
+					}
+				}).then(function () {
+					inFlight = null;
+					if (again && alive) {
+						again = false;
+						saveNow(false, true);
+					}
+				});
+			return inFlight;
+		}
+
+		function leave() {
+			saveNow();
+			if (blocked && dirty && !window.confirm(t('leaveUnsaved', { reason: blocked }))) {
+				picker.input.value = date;
+				return false;
+			}
+			alive = false;
+			return inFlight;
+		}
+
+		function onInput(e) {
+			dirty = true;
+			edits.set(e.target, (edits.get(e.target) || 0) + 1);
+			markField(e.target, 'pending');
+			update();
+			scheduleSave();
+		}
+
+		const picker = dayPicker(date, function (d) {
+			S.kitchenDate = d;
+			render();
+		});
+
+		let poolLine;
+		if (!day) {
+			poolLine = el('p', { class: 'notice warn', text: t('kitchenNoTips') });
+		} else {
+			const pool = C.summarizeKitchen({ serverPct: pct, staff: [], days: [day], kitchenHours: [] }, date, date).totals;
+			// The hours total is in the table's last row, live while typing.
+			poolLine = el('div', null, [
+				el('div', { class: 'cards' }, [
+					statCard(t('cardTotalTips'), day.totalTips === null ? t('missing') : money(day.totalTips), ''),
+					statCard(t('cardKitchen', { pct: 100 - pct }), money(pool.kitchen) + (day.totalTips === null ? ' *' : ''), 'accent'),
+				]),
+				day.totalTips === null ? el('p', { class: 'muted small', text: t('kitchenNotFinalNote') }) : null,
+			]);
+		}
+
+		const table = people.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid entry-grid' }, [
+			el('colgroup', null, [el('col', { class: 'col-name' }), el('col', { class: 'col-hours' }), el('col', { class: 'col-share' })]),
+			el('thead', null, el('tr', null, [
+				el('th', { text: t('person') }),
+				el('th', { text: t('hours') }),
+				el('th', { class: 'num', text: t('share') }),
+			])),
+			el('tbody', null, kitchenGroups(people).map(function (g) {
+				return [groupRow(g.team, 3)].concat(g.list.map(function (p) {
+					fields[p.id] = el('input', {
+						type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0',
+						'aria-label': p.name + ' ' + t('hours'),
+						value: saved[p.id] ? C.formatHours(saved[p.id]) : '', oninput: onInput,
+					});
+					shareCells[p.id] = el('td', { class: 'num share' }, '—');
+					return el('tr', null, [
+						el('td', { class: 'name' }, [p.name, p.active ? null : el('span', { class: 'tag', text: t('inactiveTag') })]),
+						el('td', { class: 'hours-cell' }, fields[p.id]),
+						shareCells[p.id],
+					]);
+				}));
+			})),
+			el('tfoot', null, el('tr', null, [el('th', { text: t('total') }), footHours, footShare])),
+		])) : el('p', { class: 'notice warn' }, [
+			t('noKitchenStaffYet') + ' ',
+			el('button', { type: 'button', class: 'btn small', onclick: function () { S.tab = 'staff'; render(); } }, t('goToPeople')),
+		]);
+
+		const form = el('form', {
+			class: 'card narrow',
+			novalidate: true,
+			onsubmit: function (ev) {
+				ev.preventDefault(); // Enter / the keyboard's Go key saves now
+				saveNow();
+			},
+		}, [
+			kitchenSwitch(),
+			picker.node,
+			people.length ? bar.node : null,
+			poolLine,
+			table,
+			leftoverLine,
+			people.length ? el('p', { class: 'muted small', text: t('kitchenHoursHelp') }) : null,
+		]);
+		// Leaving a field saves it right away (no need to wait 1.5 s).
+		form.addEventListener('focusout', function () {
+			if (timer) {
+				saveNow();
+			}
+		});
+		entryForm = {
+			flush: saveNow,
+			leave: leave,
+			restore: function () {
+				S.tab = 'kitchen';
+				S.kitchenView = 'hours';
+				S.kitchenDate = date;
+				S.kitchenPersonId = null;
+			},
+			unsaved: function () { return dirty; },
+		};
+		bar.set(Object.keys(saved).length ? 'stored' : 'idle');
+		update();
+		return form;
+	}
+
+	/* ------------------------------------------------------------------ */
 	/* Servers tab                                                         */
 	/* ------------------------------------------------------------------ */
 
@@ -1648,9 +2230,20 @@
 		}
 	}
 
+	const TEAMS = ['server', 'sushi', 'kitchen'];
+
+	function teamLabel(team) {
+		return t('team_' + team);
+	}
+
 	function renderStaffTab() {
+		const admin = isAdmin();
 		const nameInput = el('input', { type: 'text', maxlength: C.MAX_NAME_LENGTH, placeholder: t('serverNamePlaceholder'), autocomplete: 'off', 'aria-label': t('serverNamePlaceholder') });
 		const addBtn = el('button', { type: 'submit', class: 'btn primary' }, t('addServer'));
+		// The admin picks the team; servers can only add servers.
+		const teamInput = admin ? el('select', { 'aria-label': t('team') }, TEAMS.map(function (team) {
+			return el('option', { value: team }, teamLabel(team));
+		})) : null;
 
 		async function onAdd(ev) {
 			ev.preventDefault();
@@ -1659,20 +2252,29 @@
 				toast(t('err_invalid_name'), 'error');
 				return;
 			}
-			const added = await serverAction('add_server', { p_name: name }, addBtn);
+			const args = { p_name: name };
+			if (teamInput) {
+				args.p_team = teamInput.value;
+			}
+			const team = teamInput ? teamInput.value : 'server';
+			const added = await serverAction('add_server', args, addBtn);
 			if (added) {
 				const again = document.querySelector('.add-server input');
 				if (again) {
 					again.focus({ preventScroll: true }); // ready for the next name
 				}
+				const sel = document.querySelector('.add-server select');
+				if (sel) {
+					sel.value = team; // adding a whole team in a row
+				}
 				showServerRow(added.id);
 			}
 		}
 
-		const list = S.servers.map(function (s) {
+		function row(s) {
 			return el('li', { class: 'server-row' + (s.active ? '' : ' is-inactive'), 'data-server-id': s.id }, [
 				// Only the admin can change an existing name (staff can still add servers).
-				!isAdmin() ? el('span', { class: 'server-name', text: s.name }) : el('input', {
+				!admin ? el('span', { class: 'server-name', text: s.name }) : el('input', {
 					type: 'text',
 					maxlength: C.MAX_NAME_LENGTH,
 					value: s.name,
@@ -1695,7 +2297,23 @@
 				}),
 				// Only inactive servers are marked; the empty span keeps the columns lined up.
 				s.active ? el('span') : el('span', { class: 'badge', text: t('inactive') }),
-				isAdmin() ? el('div', { class: 'row tight' }, [
+				admin ? el('div', { class: 'row tight' }, [
+					el('select', {
+						class: 'team-select',
+						'aria-label': t('teamOf', { name: s.name }),
+						onchange: function (e) {
+							const to = e.target.value;
+							serverAction('set_server_team', { p_id: s.id, p_team: to }, e.currentTarget).then(function (ok) {
+								if (ok) {
+									showServerRow(s.id); // it moved to another group
+								} else {
+									e.target.value = teamOf(s);
+								}
+							});
+						},
+					}, TEAMS.map(function (team) {
+						return el('option', { value: team, selected: team === teamOf(s) }, teamLabel(team));
+					})),
 					el('button', {
 						type: 'button',
 						class: 'btn small',
@@ -1712,13 +2330,22 @@
 					}, t('delete')),
 				]) : null,
 			]);
-		});
+		}
+
+		// The admin sees everyone, in one group per team; servers see only servers.
+		const groups = admin ? TEAMS.map(function (team) {
+			const people = S.servers.filter(function (x) { return teamOf(x) === team; });
+			return people.length ? [
+				el('h3', { class: 'section-title', text: teamLabel(team) + ' (' + people.length + ')' }),
+				el('ul', { class: 'server-list' }, people.map(row)),
+			] : null;
+		}) : (S.servers.length ? el('ul', { class: 'server-list' }, S.servers.map(row)) : null);
 
 		return el('section', { class: 'card narrow' }, [
-			el('h2', { text: t('staffTitle') }),
-			el('p', { class: 'muted', text: isAdmin() ? t('staffHelpAdmin') : t('staffHelp') }),
-			el('form', { class: 'row add-server', onsubmit: onAdd }, [nameInput, addBtn]),
-			S.servers.length ? el('ul', { class: 'server-list' }, list) : el('p', { class: 'muted', text: t('noServersYet') }),
+			el('h2', { text: admin ? t('peopleTitle') : t('staffTitle') }),
+			el('p', { class: 'muted', text: admin ? t('staffHelpAdmin') : t('staffHelp') }),
+			el('form', { class: 'row add-server', onsubmit: onAdd }, [nameInput, teamInput, addBtn]),
+			S.servers.length ? groups : el('p', { class: 'muted', text: t('noServersYet') }),
 		]);
 	}
 
@@ -1796,6 +2423,7 @@
 		]));
 
 		parts.push(passwordForm('staff', t('changePin'), t('changePinHelp'), 4));
+		parts.push(passwordForm('kitchen', t('changeKitchenPin'), t('changeKitchenPinHelp'), 4));
 		parts.push(passwordForm('admin', t('changeAdminPw'), t('changeAdminPwHelp'), 8));
 		parts.push(errorLogCard());
 		return el('div', { class: 'stack narrow' }, parts);

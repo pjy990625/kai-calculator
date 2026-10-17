@@ -12,6 +12,9 @@
  *   per shift:  servers' pool = tips × server% (default 60%)
  *               kitchen/sushi = tips − servers' pool (40%)
  *               server A      = servers' pool ÷ all servers' hours on that shift × A's hours
+ *   per day:    kitchen pool  = the kitchen part of both shifts
+ *               cook B        = kitchen pool ÷ all kitchen + sushi bar hours that day × B's hours
+ *               (one pool for the kitchen and the sushi bar; their hours are per day, not per shift)
  *
  * Rounding rule (the restaurant's): each server's share is paid in WHOLE
  * DOLLARS. Everyone gets the whole dollars of their exact share; the spare
@@ -454,6 +457,132 @@
 		};
 	}
 
+	/**
+	 * The kitchen and sushi bar for [from, to] (inclusive): each day's kitchen
+	 * pool (the kitchen part of both shifts) split by that day's hours across
+	 * everyone in the kitchen and at the sushi bar, in whole dollars like the
+	 * servers (see splitWholeDollars).
+	 *
+	 * A day counts once it has tips or kitchen hours. A day with tips but no
+	 * kitchen hours yet reports its pool as `unallocated` (warning 'noKitchenHours').
+	 * `final` is false while the whole-day total is missing: the pool is then
+	 * only the day shift's part and grows at closing.
+	 *
+	 * @param {{serverPct:number, staff:{id,name,team}[], days:{date,dayTips,totalTips}[],
+	 *          kitchenHours:{date,staffId,hundredths}[]}} input
+	 */
+	function summarizeKitchen(input, from, to) {
+		const pct = input.serverPct;
+		const order = {};
+		input.staff.forEach(function (x, i) { order[x.id] = i; });
+		function byOrder(a, b) {
+			const ia = order[a] === undefined ? Infinity : order[a];
+			const ib = order[b] === undefined ? Infinity : order[b];
+			if (ia !== ib) {
+				return ia < ib ? -1 : 1;
+			}
+			return a < b ? -1 : (a > b ? 1 : 0);
+		}
+		function info(id) {
+			const i = order[id];
+			return i === undefined ? { name: null, team: null } : { name: input.staff[i].name, team: input.staff[i].team };
+		}
+
+		const tipsByDate = {};
+		input.days.forEach(function (d) {
+			if (d.date >= from && d.date <= to) {
+				tipsByDate[d.date] = d;
+			}
+		});
+		const hoursByDate = {};
+		input.kitchenHours.forEach(function (h) {
+			if (h.date >= from && h.date <= to && h.hundredths > 0) {
+				(hoursByDate[h.date] = hoursByDate[h.date] || []).push(h);
+			}
+		});
+		const dates = Object.keys(Object.assign({}, tipsByDate, hoursByDate)).sort();
+
+		const rows = {};
+		const personDays = {}; // id → [{date, hours, tips, final}]
+		const totals = { tips: 0, kitchen: 0, paid: 0, leftover: 0, unallocated: 0, hours: 0, perHourCents: 0 };
+		const warnings = [];
+		const dayList = dates.map(function (date) {
+			const d = tipsByDate[date] || null;
+			let kitchen = 0;
+			if (d) {
+				SHIFTS.forEach(function (shift) {
+					const tips = 'day' === shift ? d.dayTips : nightTips(d);
+					kitchen += tips - serverPool(tips, pct);
+				});
+			}
+			const final = !!d && d.totalTips !== null && d.totalTips !== undefined;
+			const entries = (hoursByDate[date] || [])
+				.sort(function (a, b) { return byOrder(a.staffId, b.staffId); })
+				.map(function (h) { return { key: h.staffId, weight: h.hundredths }; });
+			const shares = splitWholeDollars(kitchen, 100, entries);
+			const hours = sumWeights(entries);
+			const detail = {
+				date: date,
+				totalTips: d ? d.totalTips : null,
+				dayTips: d ? d.dayTips : 0,
+				hasTips: !!d,
+				final: final,
+				kitchen: kitchen,
+				paid: 0,
+				leftover: 0,
+				unallocated: 0,
+				hours: hours,
+				perHourCents: 0,
+				staff: [], // [{id, name, team, hours, tips}]
+			};
+			entries.forEach(function (e) {
+				const tips = shares[e.key] || 0;
+				const who = info(e.key);
+				detail.staff.push({ id: e.key, name: who.name, team: who.team, hours: e.weight, tips: tips });
+				detail.paid += tips;
+				if (!rows[e.key]) {
+					rows[e.key] = { id: e.key, name: who.name, team: who.team, hours: 0, tips: 0, perHourCents: 0 };
+				}
+				rows[e.key].hours += e.weight;
+				rows[e.key].tips += tips;
+				(personDays[e.key] = personDays[e.key] || []).push({ date: date, hours: e.weight, tips: tips, final: final });
+			});
+			if (entries.length) {
+				detail.leftover = kitchen - detail.paid;
+			} else if (kitchen > 0) {
+				detail.unallocated = kitchen;
+				warnings.push({ type: 'noKitchenHours', date: date, cents: kitchen });
+			}
+			if (d && !final) {
+				warnings.push({ type: 'missingTotal', date: date });
+			}
+			detail.perHourCents = hours > 0 ? Math.round(detail.paid * 100 / hours) : 0;
+			totals.tips += d ? d.dayTips + nightTips(d) : 0;
+			totals.kitchen += kitchen;
+			totals.paid += detail.paid;
+			totals.leftover += detail.leftover;
+			totals.unallocated += detail.unallocated;
+			totals.hours += hours;
+			return detail;
+		});
+		totals.perHourCents = totals.hours > 0 ? Math.round(totals.paid * 100 / totals.hours) : 0;
+		const list = Object.keys(rows).sort(byOrder).map(function (id) {
+			const r = rows[id];
+			r.perHourCents = r.hours > 0 ? Math.round(r.tips * 100 / r.hours) : 0;
+			return r;
+		});
+		return {
+			from: from,
+			to: to,
+			serverPct: pct,
+			rows: list,
+			days: dayList,
+			personDays: personDays,
+			totals: totals,
+			warnings: warnings,
+		};
+	}
+
 	return {
 		SHIFTS: SHIFTS,
 		MAX_NAME_LENGTH: MAX_NAME_LENGTH,
@@ -478,5 +607,6 @@
 		splitShift: splitShift,
 		nightTips: nightTips,
 		summarize: summarize,
+		summarizeKitchen: summarizeKitchen,
 	};
 }));

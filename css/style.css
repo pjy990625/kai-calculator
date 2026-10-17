@@ -227,6 +227,8 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 .grid th, .grid td { padding: 8px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
 .grid thead th { font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); font-weight: 600; white-space: nowrap; }
+/* When a column title wraps (phones), Korean breaks between words, not inside one ("총 시간", not "총 시/간"). */
+.grid th { word-break: keep-all; }
 .grid tfoot th { border-bottom: 0; border-top: 2px solid var(--line); }
 .grid .num { text-align: right; }
 .report-grid td, .report-grid th { white-space: nowrap; }
@@ -271,6 +273,15 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
 	background: var(--surface-2); color: var(--muted);
 }
 .badge.on { background: var(--accent-soft); color: var(--accent); }
+.badge.kitchen { background: var(--warn-soft); color: var(--day); }
+
+/* Kitchen tab: admin's Enter hours | Report switch, and team headings inside tables. */
+.kitchen-switch { margin-bottom: 12px; }
+.grid .group-row th {
+	background: var(--surface-2); color: var(--muted);
+	font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em;
+	padding-top: 6px; padding-bottom: 6px;
+}
 
 /* Reports */
 
@@ -324,7 +335,8 @@ button.link {
 /* Servers */
 
 .add-server { margin: 8px 0 16px; }
-.add-server input { flex: 1; }
+.add-server input { flex: 1; min-width: 0; }
+.add-server select, .team-select { width: auto; min-width: 0; }
 .server-list { list-style: none; margin: 0; padding: 0; }
 .server-row {
 	display: grid;

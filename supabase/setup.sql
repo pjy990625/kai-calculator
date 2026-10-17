@@ -8,8 +8,13 @@
 -- After running it, set the passwords ONCE in the SQL editor
 -- (they are NOT stored in this file or in GitHub):
 --
---   select private.set_password('staff', '직원 PIN');
+--   select private.set_password('staff', '서버 PIN');
+--   select private.set_password('kitchen', '주방 PIN');
 --   select private.set_password('admin', '관리자 비밀번호 (8자 이상)');
+--
+-- Three logins: the servers' PIN ('staff') sees only servers' hours and tips,
+-- the kitchen PIN ('kitchen') sees only the kitchen and sushi bar, the admin
+-- sees everything. The database decides what each one gets.
 --
 -- Security model
 --   * All tables live in the `private` schema, which the Supabase API
@@ -41,6 +46,7 @@ create table if not exists private.config (
 	admin_hash        text
 );
 insert into private.config (id) values (1) on conflict (id) do nothing;
+alter table private.config add column if not exists kitchen_hash text;
 -- Older versions kept records for 3 months (the old default). Keep them for
 -- 1 year now. Only the old default is changed, so re-running this file never
 -- undoes a value set on purpose. Records already deleted cannot come back.
@@ -59,6 +65,11 @@ create table if not exists private.servers (
 create unique index if not exists servers_name_ci on private.servers (lower(name));
 -- Older versions had a manual order. Servers are now always listed by name.
 alter table private.servers drop column if exists sort_order;
+-- Everyone who shares tips is in this table: servers (60%), and the kitchen
+-- and sushi bar (40%, split by hours across both). Existing rows are servers.
+alter table private.servers add column if not exists team text not null default 'server';
+alter table private.servers drop constraint if exists servers_team_check;
+alter table private.servers add constraint servers_team_check check (team in ('server', 'kitchen', 'sushi'));
 
 create table if not exists private.days (
 	date             date primary key,
@@ -80,12 +91,25 @@ create table if not exists private.hours (
 );
 create index if not exists hours_server_id on private.hours (server_id);
 
+-- Kitchen and sushi bar: one number per person per day (the whole day, not
+-- per shift), entered by the admin from the paper sheet. No link to
+-- private.days: the hours can be entered before or after the tips.
+create table if not exists private.kitchen_hours (
+	date       date not null,
+	server_id  uuid not null references private.servers (id),
+	hundredths int  not null check (hundredths between 1 and 2400),
+	primary key (date, server_id)
+);
+create index if not exists kitchen_hours_server_id on private.kitchen_hours (server_id);
+
 create table if not exists private.sessions (
 	token_hash bytea primary key,
 	role       text not null check (role in ('staff', 'admin')),
 	created_at timestamptz not null default now(),
 	expires_at timestamptz not null
 );
+alter table private.sessions drop constraint if exists sessions_role_check;
+alter table private.sessions add constraint sessions_role_check check (role in ('staff', 'kitchen', 'admin'));
 
 create table if not exists private.login_attempts (
 	id bigint generated always as identity primary key,
@@ -124,6 +148,7 @@ alter table private.config         enable row level security;
 alter table private.servers        enable row level security;
 alter table private.days           enable row level security;
 alter table private.hours          enable row level security;
+alter table private.kitchen_hours  enable row level security;
 alter table private.sessions       enable row level security;
 alter table private.login_attempts enable row level security;
 alter table private.audit_log      enable row level security;
@@ -194,7 +219,7 @@ begin
 end;
 $$;
 
--- Returns 'staff' or 'admin' for a valid token, otherwise fails.
+-- Returns 'staff' (servers), 'kitchen' or 'admin' for a valid token, otherwise fails.
 create or replace function private.session_role(p_token text)
 returns text
 language plpgsql
@@ -250,6 +275,7 @@ declare
 	v_months int := (private.cfg()).retention_months;
 begin
 	delete from private.days d where d.date < v_start; -- hours cascade
+	delete from private.kitchen_hours k where k.date < v_start;
 	delete from private.sessions s where s.expires_at <= now();
 	delete from private.login_attempts a where a.at < now() - interval '1 day';
 	delete from private.audit_log l where l.at < now() - make_interval(months => v_months);
@@ -266,36 +292,60 @@ as $$
 	select trim(regexp_replace(coalesce(p_name, ''), '\s+', ' ', 'g'));
 $$;
 
+-- Is p_password already the password of another login? The servers' PIN, the
+-- kitchen PIN and the admin password must all differ, or one would open another.
+create or replace function private.password_taken(p_kind text, p_password text)
+returns boolean
+language sql
+stable
+set search_path = ''
+as $$
+	select exists (
+		select 1 from private.config c,
+			lateral (values ('staff', c.staff_hash), ('kitchen', c.kitchen_hash), ('admin', c.admin_hash)) h(kind, hash)
+		where c.id = 1 and h.kind <> p_kind and h.hash is not null
+			and extensions.crypt(p_password, h.hash) = h.hash
+	);
+$$;
+
+-- Stores a new password for one login and logs out everyone using it
+-- (except the session p_keep, if given).
+create or replace function private.store_password(p_kind text, p_password text, p_keep bytea default null)
+returns void
+language plpgsql
+set search_path = ''
+as $$
+declare
+	v_hash text := extensions.crypt(p_password, extensions.gen_salt('bf', 10));
+begin
+	update private.config c set
+		staff_hash = case when p_kind = 'staff' then v_hash else c.staff_hash end,
+		kitchen_hash = case when p_kind = 'kitchen' then v_hash else c.kitchen_hash end,
+		admin_hash = case when p_kind = 'admin' then v_hash else c.admin_hash end
+	where c.id = 1;
+	delete from private.sessions s where s.role = p_kind and s.token_hash is distinct from p_keep;
+end;
+$$;
+
 -- Set a password. Run from the SQL editor: select private.set_password('staff', '1234');
--- Logs out everyone using that role.
+-- Kinds: 'staff' (servers' PIN), 'kitchen' (kitchen PIN), 'admin'. Logs out everyone using that login.
 create or replace function private.set_password(p_kind text, p_password text)
 returns text
 language plpgsql
 set search_path = ''
 as $$
-declare
-	v_other text;
 begin
-	if p_kind not in ('staff', 'admin') then
-		raise exception 'kind must be staff or admin';
+	if p_kind is null or p_kind not in ('staff', 'kitchen', 'admin') then
+		raise exception 'kind must be staff, kitchen or admin';
 	end if;
 	if p_password is null or length(p_password) > 200
-		or (p_kind = 'staff' and length(p_password) < 4)
-		or (p_kind = 'admin' and length(p_password) < 8) then
-		raise exception 'password too short (staff: 4+, admin: 8+ characters)';
+		or length(p_password) < (case when p_kind = 'admin' then 8 else 4 end) then
+		raise exception 'password too short (PIN: 4+, admin: 8+ characters)';
 	end if;
-	-- The PIN and the admin password must differ, or the PIN would grant admin.
-	select case when p_kind = 'staff' then c.admin_hash else c.staff_hash end into v_other
-	from private.config c where c.id = 1;
-	if v_other is not null and extensions.crypt(p_password, v_other) = v_other then
-		raise exception 'staff PIN and admin password must be different';
+	if private.password_taken(p_kind, p_password) then
+		raise exception 'the servers'' PIN, the kitchen PIN and the admin password must be different';
 	end if;
-	if p_kind = 'staff' then
-		update private.config set staff_hash = extensions.crypt(p_password, extensions.gen_salt('bf', 10)) where id = 1;
-	else
-		update private.config set admin_hash = extensions.crypt(p_password, extensions.gen_salt('bf', 10)) where id = 1;
-	end if;
-	delete from private.sessions s where s.role = p_kind;
+	perform private.store_password(p_kind, p_password);
 	return 'ok';
 end;
 $$;
@@ -313,7 +363,7 @@ as $$
 $$;
 
 -- Can this role add or change the record of p_date right now?
--- Staff: the last 7 days (see staff_edit_from). Older days are closed and only
+-- Staff (servers): the last 7 days (see staff_edit_from). Older days are closed and only
 -- the admin can change them. A past day also needs the name of the person
 -- changing it (see save_shifts), which the app asks for when "Edit" is tapped.
 drop function if exists private.can_edit(text, date, timestamptz); -- older signature
@@ -326,13 +376,16 @@ as $$
 	select case
 		when p_date is null or p_date < private.retention_start() or p_date > private.today() then false
 		when p_role = 'admin' then true
-		else p_date >= private.staff_edit_from()
+		when p_role = 'staff' then p_date >= private.staff_edit_from()
+		else false -- the kitchen login only views
 	end;
 $$;
 
--- Checks a list of hours for ONE shift:
+-- Checks a list of hours for ONE shift (or one day of the kitchen):
 --   [{"server_id": "...", "hundredths": 550}, ...]   (550 = 5.5 h)
-create or replace function private.check_hours(p_hours jsonb)
+-- Everyone in it must be in one of p_teams (servers' hours: 'server' only).
+drop function if exists private.check_hours(jsonb); -- older signature
+create or replace function private.check_hours(p_hours jsonb, p_teams text[])
 returns void
 language plpgsql
 stable
@@ -355,7 +408,7 @@ begin
 		if v_h <> trunc(v_h) or v_h < 1 or v_h > 2400 then
 			perform private.fail('invalid_hours');
 		end if;
-		if not exists (select 1 from private.servers s where s.id = (v_e ->> 'server_id')::uuid) then
+		if not exists (select 1 from private.servers s where s.id = (v_e ->> 'server_id')::uuid and s.team = any (p_teams)) then
 			perform private.fail('unknown_server');
 		end if;
 	end loop;
@@ -372,8 +425,24 @@ language sql
 stable
 set search_path = ''
 as $$
-	select json_build_object('id', s.id, 'name', s.name, 'active', s.active)
+	select json_build_object('id', s.id, 'name', s.name, 'active', s.active, 'team', s.team)
 	from private.servers s where s.id = p_id;
+$$;
+
+-- Which teams a login may see: servers see servers, the kitchen login sees
+-- the kitchen and sushi bar, the admin sees everyone.
+create or replace function private.sees_team(p_role text, p_team text)
+returns boolean
+language sql
+immutable
+set search_path = ''
+as $$
+	select case p_role
+		when 'admin' then true
+		when 'staff' then p_team = 'server'
+		when 'kitchen' then p_team in ('kitchen', 'sushi')
+		else false
+	end;
 $$;
 
 -- ---------------------------------------------------------------------
@@ -402,7 +471,7 @@ begin
 	end if;
 
 	v_cfg := private.cfg();
-	if v_cfg.staff_hash is null and v_cfg.admin_hash is null then
+	if v_cfg.staff_hash is null and v_cfg.kitchen_hash is null and v_cfg.admin_hash is null then
 		return json_build_object('ok', false, 'error', 'not_configured');
 	end if;
 
@@ -411,6 +480,8 @@ begin
 			v_role := 'admin';
 		elsif v_cfg.staff_hash is not null and extensions.crypt(p_password, v_cfg.staff_hash) = v_cfg.staff_hash then
 			v_role := 'staff';
+		elsif v_cfg.kitchen_hash is not null and extensions.crypt(p_password, v_cfg.kitchen_hash) = v_cfg.kitchen_hash then
+			v_role := 'kitchen';
 		end if;
 	end if;
 
@@ -464,9 +535,10 @@ begin
 		),
 		'servers', coalesce((
 			-- By name; the browser re-sorts with its own (language-aware) rules.
-			select json_agg(json_build_object('id', s.id, 'name', s.name, 'active', s.active)
+			select json_agg(json_build_object('id', s.id, 'name', s.name, 'active', s.active, 'team', s.team)
 				order by lower(s.name), s.id)
 			from private.servers s
+			where private.sees_team(v_role, s.team)
 		), '[]'::json)
 	);
 end;
@@ -500,10 +572,16 @@ begin
 			) order by d.date)
 			from private.days d where d.date between p_from and p_to
 		), '[]'::json),
+		-- Servers' hours: servers and the admin. The kitchen's: the kitchen login and the admin.
 		'hours', coalesce((
 			select json_agg(json_build_object('date', h.date, 'server_id', h.server_id, 'shift', h.shift, 'hundredths', h.hundredths)
 				order by h.date, h.shift)
-			from private.hours h where h.date between p_from and p_to
+			from private.hours h where h.date between p_from and p_to and v_role in ('staff', 'admin')
+		), '[]'::json),
+		'kitchen_hours', coalesce((
+			select json_agg(json_build_object('date', k.date, 'server_id', k.server_id, 'hundredths', k.hundredths)
+				order by k.date)
+			from private.kitchen_hours k where k.date between p_from and p_to and v_role in ('kitchen', 'admin')
 		), '[]'::json)
 	);
 end;
@@ -582,10 +660,10 @@ begin
 		perform private.fail('invalid_tips');
 	end if;
 	if v_set_day then
-		perform private.check_hours(p_day_hours);
+		perform private.check_hours(p_day_hours, array['server']);
 	end if;
 	if v_set_night then
-		perform private.check_hours(p_night_hours);
+		perform private.check_hours(p_night_hours, array['server']);
 	end if;
 
 	begin
@@ -694,7 +772,9 @@ begin
 end;
 $$;
 
-create or replace function public.add_server(p_token text, p_name text)
+-- Servers can add servers; only the admin adds kitchen and sushi bar staff.
+drop function if exists public.add_server(text, text); -- older signature
+create or replace function public.add_server(p_token text, p_name text, p_team text default 'server')
 returns json
 language plpgsql
 security definer
@@ -703,16 +783,23 @@ as $$
 declare
 	v_role text := private.session_role(p_token);
 	v_name text := private.clean_name(p_name);
+	v_team text := coalesce(p_team, 'server');
 	v_id uuid;
 begin
+	if v_role = 'kitchen' or (v_team <> 'server' and v_role <> 'admin') then
+		perform private.fail('admin_only');
+	end if;
+	if v_team not in ('server', 'kitchen', 'sushi') then
+		perform private.fail('invalid_team');
+	end if;
 	if char_length(v_name) not between 1 and 60 then
 		perform private.fail('invalid_name');
 	end if;
 	if exists (select 1 from private.servers s where lower(s.name) = lower(v_name)) then
 		perform private.fail('duplicate_name');
 	end if;
-	insert into private.servers (name) values (v_name) returning id into v_id;
-	perform private.log(v_role, 'add_server', jsonb_build_object('id', v_id, 'name', v_name));
+	insert into private.servers (name, team) values (v_name, v_team) returning id into v_id;
+	perform private.log(v_role, 'add_server', jsonb_build_object('id', v_id, 'name', v_name, 'team', v_team));
 	return private.server_json(v_id);
 end;
 $$;
@@ -772,7 +859,8 @@ declare
 	v_name text;
 begin
 	perform private.require_admin(p_token);
-	if exists (select 1 from private.hours h where h.server_id = p_id) then
+	if exists (select 1 from private.hours h where h.server_id = p_id)
+		or exists (select 1 from private.kitchen_hours k where k.server_id = p_id) then
 		perform private.fail('server_has_hours');
 	end if;
 	delete from private.servers s where s.id = p_id returning s.name into v_name;
@@ -781,6 +869,78 @@ begin
 	end if;
 	perform private.log('admin', 'delete_server', jsonb_build_object('id', p_id, 'name', v_name));
 	return json_build_object('ok', true);
+end;
+$$;
+
+-- Moves someone between the servers, the kitchen and the sushi bar. Kitchen ↔
+-- sushi bar is always fine (same 40% pool); a move between servers and the
+-- kitchen is refused once they have hours on the other side, so old days
+-- keep adding up.
+create or replace function public.set_server_team(p_token text, p_id uuid, p_team text)
+returns json
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+	v_old text;
+begin
+	perform private.require_admin(p_token);
+	if p_team is null or p_team not in ('server', 'kitchen', 'sushi') then
+		perform private.fail('invalid_team');
+	end if;
+	select s.team into v_old from private.servers s where s.id = p_id for update;
+	if v_old is null then
+		perform private.fail('not_found');
+	end if;
+	if (p_team = 'server') <> (v_old = 'server') and (
+		exists (select 1 from private.hours h where h.server_id = p_id)
+		or exists (select 1 from private.kitchen_hours k where k.server_id = p_id)) then
+		perform private.fail('team_has_hours');
+	end if;
+	update private.servers s set team = p_team where s.id = p_id;
+	perform private.log('admin', 'set_server_team', jsonb_build_object('id', p_id, 'from', v_old, 'to', p_team));
+	return private.server_json(p_id);
+end;
+$$;
+
+-- Admin: the kitchen and sushi bar hours of one date, from the paper sheet.
+-- Replaces all of that date's kitchen hours.
+--   p_hours: [{"server_id": "...", "hundredths": 950}, ...]   ([] = nobody)
+create or replace function public.save_kitchen_hours(p_token text, p_date date, p_hours jsonb)
+returns json
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+	v_before jsonb;
+begin
+	perform private.require_admin(p_token);
+	if p_date is null then
+		perform private.fail('invalid_date');
+	end if;
+	if p_date > private.today() then
+		perform private.fail('future_date');
+	end if;
+	if p_date < private.retention_start() then
+		perform private.fail('too_old');
+	end if;
+	perform private.check_hours(p_hours, array['kitchen', 'sushi']);
+
+	select jsonb_agg(jsonb_build_object('server_id', k.server_id, 'hundredths', k.hundredths) order by k.server_id)
+	into v_before
+	from private.kitchen_hours k where k.date = p_date;
+
+	delete from private.kitchen_hours k where k.date = p_date;
+	insert into private.kitchen_hours (date, server_id, hundredths)
+	select p_date, (e ->> 'server_id')::uuid, (e ->> 'hundredths')::int
+	from jsonb_array_elements(p_hours) e;
+
+	perform private.log('admin', 'save_kitchen_hours', jsonb_build_object(
+		'date', p_date, 'before', coalesce(v_before, '[]'::jsonb), 'after', p_hours));
+	perform private.purge();
+	return json_build_object('ok', true, 'date', p_date);
 end;
 $$;
 
@@ -815,7 +975,7 @@ begin
 end;
 $$;
 
--- Admin changes the staff PIN or the admin password from the app.
+-- Admin changes the servers' PIN, the kitchen PIN or the admin password from the app.
 -- Everyone else using that role is logged out (the caller stays logged in).
 create or replace function public.change_password(p_token text, p_kind text, p_new_password text)
 returns json
@@ -827,23 +987,15 @@ declare
 	v_my_hash bytea := extensions.digest(coalesce(p_token, ''), 'sha256');
 begin
 	perform private.require_admin(p_token);
-	if p_kind not in ('staff', 'admin') or p_new_password is null or length(p_new_password) > 200
-		or (p_kind = 'staff' and length(p_new_password) < 4)
-		or (p_kind = 'admin' and length(p_new_password) < 8) then
+	if p_kind is null or p_kind not in ('staff', 'kitchen', 'admin') or p_new_password is null or length(p_new_password) > 200
+		or length(p_new_password) < (case when p_kind = 'admin' then 8 else 4 end) then
 		perform private.fail('invalid_password');
 	end if;
-	-- The PIN and the admin password must differ, or the PIN would grant admin.
-	if p_kind = 'staff' and extensions.crypt(p_new_password, (private.cfg()).admin_hash) = (private.cfg()).admin_hash
-		or p_kind = 'admin' and (private.cfg()).staff_hash is not null
-			and extensions.crypt(p_new_password, (private.cfg()).staff_hash) = (private.cfg()).staff_hash then
+	-- All three must differ, or one password would open another login.
+	if private.password_taken(p_kind, p_new_password) then
 		perform private.fail('password_conflict');
 	end if;
-	if p_kind = 'staff' then
-		update private.config set staff_hash = extensions.crypt(p_new_password, extensions.gen_salt('bf', 10)) where id = 1;
-	else
-		update private.config set admin_hash = extensions.crypt(p_new_password, extensions.gen_salt('bf', 10)) where id = 1;
-	end if;
-	delete from private.sessions s where s.role = p_kind and s.token_hash <> v_my_hash;
+	perform private.store_password(p_kind, p_new_password, v_my_hash);
 	perform private.log('admin', 'change_password', jsonb_build_object('kind', p_kind));
 	return json_build_object('ok', true);
 end;
@@ -946,7 +1098,7 @@ begin
 		from pg_proc p join pg_namespace n on n.oid = p.pronamespace
 		where n.nspname = 'public'
 			and p.proname in ('login', 'logout', 'get_bootstrap', 'get_range', 'save_shifts', 'save_day', 'delete_day',
-				'add_server', 'rename_server', 'set_server_active', 'delete_server',
+				'add_server', 'rename_server', 'set_server_active', 'set_server_team', 'delete_server', 'save_kitchen_hours',
 				'update_settings', 'change_password', 'log_errors', 'get_error_log', 'clear_error_log')
 	loop
 		execute format('revoke all on function %s from public', r.sig);
