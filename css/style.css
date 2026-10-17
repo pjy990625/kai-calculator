@@ -414,7 +414,6 @@ button.link {
 .save-bar.blocked, .save-bar.failed { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
 .save-bar .btn { flex: none; margin-left: auto; }
 .notice.lock { background: var(--surface-2); border: 1px solid var(--line); }
-.unlock-box { margin: 8px 0; }
 /* A past day opened with "Edit": clearly not the normal (today) state. */
 .notice.edit-on { background: var(--warn-soft); border: 1px solid var(--warn-line); justify-content: space-between; flex-wrap: wrap; }
 input:disabled { opacity: .65; background: var(--surface-2); }

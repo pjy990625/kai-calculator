@@ -744,7 +744,7 @@
 
 	/**
 	 * A past day opens read-only so it can't be changed by a stray tap. "Edit"
-	 * opens it until another date or side is picked (or Done is tapped).
+	 * (see editButton) opens it until another date or side is picked (or Done is tapped).
 	 * `locked`: lockReason (null = the date can be changed at all).
 	 */
 	function dayLock(date, locked) {
@@ -756,32 +756,34 @@
 	}
 
 	/**
-	 * A past day, read-only: tap Edit and confirm, and the form opens for
-	 * editing (until another date is picked or Done is tapped).
+	 * The Edit button of a locked past day (see dayLock), shown in the date row
+	 * where Today is. Confirm, and the form opens for editing (until another
+	 * date or side is picked, or Done is tapped). null when there is nothing to open.
 	 */
-	function unlockBox(date) {
-		function onEdit() {
-			if (!window.confirm(t('confirmEditPast', { date: niceDate(date, true) }))) {
-				return;
-			}
-			S.unlock = { date: date };
-			render();
+	function editButton(date, lock) {
+		if (!lock.guarded) {
+			return null;
 		}
-		// Just the button: the greyed-out fields already show the day is locked.
-		return el('div', { class: 'row unlock-box' },
-			el('button', { type: 'button', class: 'btn primary small', onclick: onEdit }, t('editPast')));
+		return el('button', {
+			type: 'button',
+			class: 'btn primary small',
+			onclick: function () {
+				if (!window.confirm(t('confirmEditPast', { date: niceDate(date, true) }))) {
+					return;
+				}
+				S.unlock = { date: date };
+				render();
+			},
+		}, t('editPast'));
 	}
 
 	/**
-	 * The line under the date (see dayLock): why it is locked, the Edit button of a
-	 * past day, or that a past day is being changed (with Done). `leave` saves what was typed first.
+	 * The line under the date (see dayLock): why it is locked, or that a past
+	 * day is being changed (with Done). `leave` saves what was typed first.
 	 */
-	function dayStatus(date, lock, leave) {
+	function dayStatus(lock, leave) {
 		if (lock.locked) {
 			return el('p', { class: 'notice lock', text: '🔒 ' + lock.locked });
-		}
-		if (lock.guarded) {
-			return unlockBox(date);
 		}
 		if (!lock.unlocked) {
 			return null;
@@ -1222,7 +1224,7 @@
 			el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')),
 		]) : el('div', { hidden: true });
 
-		const status = dayStatus(date, lock, leave);
+		const status = dayStatus(lock, leave);
 
 		// The two tabs. Both panels stay in the page (one hidden), so switching
 		// tabs never throws away what was typed.
@@ -1266,7 +1268,7 @@
 			}, tabLabels[k]);
 		});
 
-		const picker = dayPicker(date, function (d) { S.entryDate = d; render(); });
+		const picker = dayPicker(date, function (d) { S.entryDate = d; render(); }, editButton(date, lock));
 		dateInput = picker.input;
 		const form = el('form', { class: 'card narrow', onsubmit: onSubmit, novalidate: true }, [
 			picker.node,
@@ -1314,9 +1316,9 @@
 
 	/**
 	 * ‹ calendar › for one day plus a Today button (Daily entry). Future dates
-	 * cannot be picked.
+	 * cannot be picked. `action` (e.g. Edit of a locked past day) takes Today's place.
 	 */
-	function dayPicker(date, onPick) {
+	function dayPicker(date, onPick, action) {
 		const input = el('input', {
 			type: 'date', class: 'date-input', value: date, max: S.today, required: true, 'aria-label': t('date'),
 			onchange: function (e) {
@@ -1331,13 +1333,13 @@
 		return {
 			input: input,
 			node: el('div', { class: 'row date-nav' }, [
-				// ‹ date › always stay on one line; Today may drop below on narrow screens.
+				// ‹ date › always stay on one line; Today / Edit may drop below on narrow screens.
 				el('div', { class: 'date-step' }, [
 					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('prevDay'), onclick: function () { onPick(C.addDays(date, -1)); } }, '‹'),
 					input,
 					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('nextDay'), disabled: date >= S.today, onclick: function () { onPick(C.addDays(date, 1)); } }, '›'),
 				]),
-				date !== S.today ? el('button', { type: 'button', class: 'btn small', onclick: function () { onPick(S.today); } }, t('today')) : null,
+				action || (date !== S.today ? el('button', { type: 'button', class: 'btn small', onclick: function () { onPick(S.today); } }, t('today')) : null),
 			]),
 		};
 	}
@@ -2145,7 +2147,7 @@
 		const picker = dayPicker(date, function (d) {
 			S.kitchenDate = d;
 			render();
-		});
+		}, editButton(date, lock));
 
 		let poolLine;
 		if (!day) {
@@ -2199,7 +2201,7 @@
 			},
 		}, [
 			picker.node,
-			dayStatus(date, lock, leave),
+			dayStatus(lock, leave),
 			people.length && !readOnly ? bar.node : null,
 			poolLine,
 			table,
