@@ -772,10 +772,9 @@
 			S.unlock = { date: date, side: sideName };
 			render();
 		}
-		return el('div', { class: 'notice lock unlock-box row' }, [
-			el('span', { text: '🔒 ' + t('pastLocked') }),
-			el('button', { type: 'button', class: 'btn primary small', onclick: onEdit }, t('editPast')),
-		]);
+		// Just the button: the greyed-out fields already show the day is locked.
+		return el('div', { class: 'row unlock-box' },
+			el('button', { type: 'button', class: 'btn primary small', onclick: onEdit }, t('editPast')));
 	}
 
 	/**
