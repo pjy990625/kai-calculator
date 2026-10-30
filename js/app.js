@@ -759,9 +759,13 @@
 	/**
 	 * The Edit button of a locked past day (see dayLock), shown in the date row
 	 * where Today is. Confirm, and the form opens for editing until Done is
-	 * tapped. null when there is nothing to open.
+	 * tapped. null when there is nothing to open; false while the day is being
+	 * edited (no Today button either: Done comes first).
 	 */
 	function editButton(date, lock) {
+		if (lock.unlocked) {
+			return false;
+		}
 		if (!lock.guarded) {
 			return null;
 		}
@@ -793,6 +797,7 @@
 			el('span', { text: '✏ ' + t('editingPast') }),
 			el('button', { type: 'button', class: 'btn primary small', id: 'edit-done', onclick: function () {
 				// Save what was typed, then lock the day again.
+				// (Its tab is picked again: a finished day opens on Summary.)
 				const unlock = S.unlock;
 				S.unlock = null; // so leave() is not blocked by needsDone
 				const r = leave();
@@ -800,6 +805,7 @@
 					S.unlock = unlock; // the user chose to stay and fix something
 					return;
 				}
+				S.entryShiftDate = null;
 				Promise.resolve(r).then(render);
 			} }, t('editDone')),
 		]);
@@ -1322,7 +1328,8 @@
 
 	/**
 	 * ‹ calendar › for one day plus a Today button (Daily entry). Future dates
-	 * cannot be picked. `action` (e.g. Edit of a locked past day) takes Today's place.
+	 * cannot be picked. `action` (e.g. Edit of a locked past day) takes Today's
+	 * place; false: neither (see editButton).
 	 */
 	function dayPicker(date, onPick, action) {
 		const input = el('input', {
@@ -1345,7 +1352,7 @@
 					input,
 					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('nextDay'), disabled: date >= S.today, onclick: function () { onPick(C.addDays(date, 1)); } }, '›'),
 				]),
-				action || (date !== S.today ? el('button', { type: 'button', class: 'btn small', onclick: function () { onPick(S.today); } }, t('today')) : null),
+				false === action ? null : action || (date !== S.today ? el('button', { type: 'button', class: 'btn small', onclick: function () { onPick(S.today); } }, t('today')) : null),
 			]),
 		};
 	}
