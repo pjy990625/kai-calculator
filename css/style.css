@@ -216,10 +216,12 @@ input.invalid { border-color: var(--danger); background: var(--danger-soft); }
 
 /* Tables */
 
-.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -4px; }
 /* A shadow on the right edge while more columns are hidden to the right. The first layer scrolls
    with the table and covers the shadow once the table is scrolled to its end (no JS needed). */
 .table-wrap {
+	overflow-x: auto;
+	-webkit-overflow-scrolling: touch;
+	margin: 0 -4px;
 	background:
 		linear-gradient(var(--surface), var(--surface)) 100% 0 / 16px 100% no-repeat local,
 		radial-gradient(farthest-side at 100% 50%, var(--scroll-shade), transparent) 100% 0 / 12px 100% no-repeat scroll;
@@ -416,6 +418,10 @@ button.link {
 .notice.lock { background: var(--surface-2); border: 1px solid var(--line); }
 /* A past day opened with "Edit": clearly not the normal (today) state. */
 .notice.edit-on { background: var(--warn-soft); border: 1px solid var(--warn-line); justify-content: space-between; flex-wrap: wrap; }
+/* Done, when the user tries to leave a past day before tapping it (see needsDone). */
+.btn.is-attention { animation: yk-attention .5s ease-in-out 3; }
+@keyframes yk-attention { 50% { box-shadow: 0 0 0 4px var(--warn-line); transform: scale(1.06); } }
+@media (prefers-reduced-motion: reduce) { .btn.is-attention { animation: none; box-shadow: 0 0 0 4px var(--warn-line); } }
 input:disabled { opacity: .65; background: var(--surface-2); }
 .badge.admin { background: var(--night-soft); color: var(--night); }
 .card.form > .btn { margin-top: 4px; }

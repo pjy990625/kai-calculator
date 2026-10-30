@@ -26,7 +26,6 @@
 		role: null,
 		today: null,
 		retentionStart: null,
-		staffEditFrom: null, // oldest date staff can change (the database decides; 7 days)
 		settings: null,
 		servers: [],
 		side: 'server', // admin: which side the tabs show, 'server' | 'kitchen' (see side())
@@ -34,7 +33,7 @@
 		entryDate: null,
 		entryShift: 'day', // which tab of the daily entry card is open: 'day' | 'night' | 'sum'
 		entryShiftDate: null, // the date entryShift was chosen for
-		unlock: null, // { date }: a past date opened with "Edit" (see dayLock)
+		unlock: null, // { date }: a past date opened with "Edit", until Done is tapped (see dayLock)
 		reportKind: 'period', // 'period' | 'month'
 		reportDate: null,
 		personId: null, // set: Reports shows this server's hours day by day
@@ -360,6 +359,7 @@
 
 	function clearSession() {
 		entryForm = null;
+		S.unlock = null;
 		S.token = null;
 		S.role = null;
 		lsRemove(TOKEN_KEY);
@@ -370,7 +370,6 @@
 		S.role = b.role;
 		S.today = b.today;
 		S.retentionStart = b.retention_start;
-		S.staffEditFrom = b.staff_edit_from || b.today; // older database: today only
 		S.settings = b.settings;
 		S.servers = C.sortServers(b.servers || []); // always alphabetical
 		if ('settings' !== S.tab && MAIN_TABS.indexOf(S.tab) < 0) {
@@ -491,6 +490,10 @@
 				{ value: 'server', label: t('sideServers') },
 				{ value: 'kitchen', label: t('sideKitchen') },
 			], side(), function (v) {
+				if (needsDone()) {
+					renderShell(); // put the switch back
+					return;
+				}
 				S.side = v;
 				lsSet(SIDE_KEY, v);
 				if ('settings' === S.tab) {
@@ -498,7 +501,6 @@
 				}
 				S.personId = null;
 				S.kitchenPersonId = null;
-				S.unlock = null; // "Edit" was for the other side's form
 				render();
 			}) : '');
 			sides.hidden = !isAdmin();
@@ -583,7 +585,6 @@
 		}
 		S.today = range.today;
 		S.retentionStart = range.retention_start;
-		S.staffEditFrom = range.staff_edit_from || range.today;
 		setMain(draw(range));
 	}
 
@@ -736,20 +737,20 @@
 		if (S.retentionStart && date < S.retentionStart) {
 			return t('lockTooOld', { months: S.settings.retention_months });
 		}
-		// Saved records: the database says. New records follow the same rule —
-		// staff for 7 days (S.staffEditFrom), the admin any time.
-		const editable = rec ? rec.editable : (isAdmin() || date >= S.staffEditFrom);
+		// Saved records: the database says. Any other kept date can be added.
+		const editable = rec ? rec.editable : true;
 		return editable ? null : t('lockClosed');
 	}
 
 	/**
 	 * A past day opens read-only so it can't be changed by a stray tap. "Edit"
-	 * (see editButton) opens it until another date or side is picked (or Done is tapped).
+	 * (see editButton) opens it until Done is tapped; leaving it before that is
+	 * blocked (see needsDone).
 	 * `locked`: lockReason (null = the date can be changed at all).
 	 */
 	function dayLock(date, locked) {
 		if (S.unlock && S.unlock.date !== date) {
-			S.unlock = null;
+			S.unlock = null; // safety net: needsDone keeps the user on the date
 		}
 		const guarded = !locked && date < S.today && !S.unlock;
 		return { locked: locked, unlocked: !!S.unlock, guarded: guarded, readOnly: !!locked || guarded };
@@ -757,8 +758,8 @@
 
 	/**
 	 * The Edit button of a locked past day (see dayLock), shown in the date row
-	 * where Today is. Confirm, and the form opens for editing (until another
-	 * date or side is picked, or Done is tapped). null when there is nothing to open.
+	 * where Today is. Confirm, and the form opens for editing until Done is
+	 * tapped. null when there is nothing to open.
 	 */
 	function editButton(date, lock) {
 		if (!lock.guarded) {
@@ -790,14 +791,37 @@
 		}
 		return el('div', { class: 'notice edit-on row' }, [
 			el('span', { text: '✏ ' + t('editingPast') }),
-			el('button', { type: 'button', class: 'btn small', onclick: function () {
+			el('button', { type: 'button', class: 'btn primary small', id: 'edit-done', onclick: function () {
 				// Save what was typed, then lock the day again.
+				const unlock = S.unlock;
+				S.unlock = null; // so leave() is not blocked by needsDone
 				const r = leave();
-				if (r !== false) {
-					Promise.resolve(r).then(function () { S.unlock = null; render(); });
+				if (false === r) {
+					S.unlock = unlock; // the user chose to stay and fix something
+					return;
 				}
+				Promise.resolve(r).then(render);
 			} }, t('editDone')),
 		]);
+	}
+
+	/**
+	 * A past day opened with Edit must be closed with Done. True (and the
+	 * user is pointed at Done) while that has not happened yet.
+	 */
+	function needsDone() {
+		if (!S.unlock || !entryForm) {
+			return false;
+		}
+		toast(t('finishEditFirst'), 'error');
+		const done = document.getElementById('edit-done');
+		if (done) {
+			done.scrollIntoView({ block: 'center', behavior: 'smooth' });
+			done.classList.remove('is-attention');
+			void done.offsetWidth; // restart the animation
+			done.classList.add('is-attention');
+		}
+		return true;
 	}
 
 	function renderEntryTab(seq) {
@@ -1130,10 +1154,11 @@
 
 		function onSaveError(e) {
 			if (e && ('locked' === e.code || 'date_locked' === e.code)) {
-				// Midnight passed (staff): the day is closed.
+				// The database closed the day (e.g. it is no longer kept).
 				clearDirty();
 				again = false;
 				toast(t('err_locked'), 'error');
+				S.unlock = null; // nothing left to finish
 				if (alive) {
 					refreshBootstrap().catch(function () {}).then(render);
 				}
@@ -1162,6 +1187,10 @@
 		 */
 		function leave() {
 			saveNow();
+			if (needsDone()) {
+				dateInput.value = date;
+				return false;
+			}
 			if (blocked && isDirty() && !window.confirm(t('leaveUnsaved', { reason: blocked.msg }))) {
 				dateInput.value = date;
 				return false;
@@ -1175,32 +1204,9 @@
 			saveNow();
 		}
 
-		/**
-		 * Staff can only change today's record, and midnight may have passed since
-		 * this page was drawn. Ask the database for today's date first; if the day
-		 * has closed, say so and redraw it as locked.
-		 */
-		async function stillOpen() {
-			if (isAdmin()) {
-				return true;
-			}
-			try {
-				await refreshBootstrap();
-			} catch (e) {
-				handleError(e);
-				return false;
-			}
-			if (date === S.today) {
-				return true;
-			}
-			toast(t('err_locked'), 'error');
-			render();
-			return false;
-		}
-
 		async function onDelete() {
 			clearTimeout(timer);
-			if (!window.confirm(t('confirmDeleteDay', { date: niceDate(date, true) })) || !(await stillOpen())) {
+			if (!window.confirm(t('confirmDeleteDay', { date: niceDate(date, true) }))) {
 				return;
 			}
 			if (inFlight) {
@@ -1213,16 +1219,16 @@
 				return;
 			}
 			clearDirty();
+			S.unlock = null; // deleting ends the edit
 			toast(t('deleted'));
 			render();
 		}
 
 		let dateInput = null;
 		// Changes save themselves, so the only action is Delete (once there is a record).
-		// Staff can change the last 7 days, but deleting a past day stays with the admin.
-		const actionsRow = isAdmin() || date === S.today ? el('div', { class: 'row actions', hidden: !rec }, [
+		const actionsRow = el('div', { class: 'row actions', hidden: !rec }, [
 			el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')),
-		]) : el('div', { hidden: true });
+		]);
 
 		const status = dayStatus(lock, leave);
 
@@ -1984,12 +1990,12 @@
 	 * next to that day's total tips (from the servers' entry, read-only).
 	 * Saves itself like the daily tips (see saveBar / markField): the whole
 	 * date is sent each time, so it is always exactly what is on screen.
-	 * Locks like the daily tips too: 7 days for the kitchen login, and a past
-	 * day opens read-only until Edit is tapped.
+	 * Locks like the daily tips too: a past day opens read-only until Edit is
+	 * tapped, and stays open until Done is tapped.
 	 */
 	function kitchenHoursForm(date, input) {
 		const pct = S.settings.server_pct;
-		const lock = dayLock(date, lockReason(date, null)); // same 7 days as the daily tips
+		const lock = dayLock(date, lockReason(date, null)); // the same dates as the daily tips
 		const readOnly = lock.readOnly;
 		const saved = {};
 		input.kitchenHours.forEach(function (h) {
@@ -2100,9 +2106,10 @@
 					}
 				}, function (e) {
 					if (e && 'locked' === e.code) {
-						// Midnight passed: the day is closed.
+						// The database closed the day (e.g. it is no longer kept).
 						again = false;
 						toast(t('err_locked'), 'error');
+						S.unlock = null; // nothing left to finish
 						if (alive) {
 							refreshBootstrap().catch(function () {}).then(render);
 						}
@@ -2128,6 +2135,10 @@
 
 		function leave() {
 			saveNow();
+			if (needsDone()) {
+				picker.input.value = date;
+				return false;
+			}
 			if (blocked && dirty && !window.confirm(t('leaveUnsaved', { reason: blocked }))) {
 				picker.input.value = date;
 				return false;
@@ -2595,7 +2606,7 @@
 		if ('visible' === document.visibilityState && S.role) {
 			const before = S.today;
 			refreshBootstrap().then(function () {
-				if (S.today !== before && !isAdmin() && 'entry' === S.tab) {
+				if (S.today !== before && 'entry' === S.tab && !S.unlock) {
 					render(); // a new day started: what was today is now a past day (locked until "Edit")
 				}
 			}).catch(function (e) {
@@ -2615,7 +2626,7 @@
 	window.addEventListener('beforeunload', function (ev) {
 		if (entryForm) {
 			entryForm.flush(true);
-			if (entryForm.unsaved()) {
+			if (entryForm.unsaved() || S.unlock) { // typed but not sendable, or Done not tapped
 				ev.preventDefault();
 				ev.returnValue = '';
 			}

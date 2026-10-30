@@ -350,21 +350,20 @@ begin
 end;
 $$;
 
--- The oldest date staff can still add or change: a day stays open to staff for
--- one week, counting the day itself (Monday's tips until Sunday 11:59 PM).
--- On a busy night the tips are often worked out the next day or later.
+-- The oldest date staff can still add or change: every day that is still kept.
+-- (It used to be the last 7 days; older pages still read it from get_bootstrap.)
 create or replace function private.staff_edit_from()
 returns date
 language sql
 stable
 set search_path = ''
 as $$
-	select private.today() - 6;
+	select private.retention_start();
 $$;
 
 -- Can this role add or change the record of p_date right now?
--- Staff (servers): the last 7 days (see staff_edit_from). Older days are closed and only
--- the admin can change them. In the app a past day opens read-only until "Edit" is tapped.
+-- Staff (servers) and the admin: any day that is still kept, up to today.
+-- In the app a past day opens read-only until "Edit" is tapped (and "Done" closes it).
 drop function if exists private.can_edit(text, date, timestamptz); -- older signature
 create or replace function private.can_edit(p_role text, p_date date)
 returns boolean
@@ -374,8 +373,7 @@ set search_path = ''
 as $$
 	select case
 		when p_date is null or p_date < private.retention_start() or p_date > private.today() then false
-		when p_role = 'admin' then true
-		when p_role = 'staff' then p_date >= private.staff_edit_from()
+		when p_role in ('admin', 'staff') then true
 		else false -- the kitchen login never changes tips
 	end;
 $$;
@@ -603,7 +601,8 @@ $$;
 --   p_editor      no longer used (older pages send who changed a past day); if
 --                 given, the name goes into the audit log.
 -- A past day opens read-only in the app until "Edit" is tapped; the database
--- only enforces the 7 days (can_edit). The audit log marks past-day changes.
+-- only checks the date is kept and not in the future (can_edit). The audit log
+-- marks past-day changes.
 drop function if exists public.save_shifts(text, date, bigint, jsonb, bigint, jsonb); -- older signature
 create or replace function public.save_shifts(
 	p_token text,
@@ -761,8 +760,8 @@ begin
 	if v_existing.date is null then
 		perform private.fail('not_found');
 	end if;
-	-- Staff can change yesterday, but deleting a past day stays with the admin.
-	if not private.can_edit(v_role, p_date) or (v_role <> 'admin' and p_date <> private.today()) then
+	-- Staff and the admin can delete any day they can change (the kitchen login: none).
+	if not private.can_edit(v_role, p_date) then
 		perform private.fail('locked');
 	end if;
 	delete from private.days d where d.date = p_date;
@@ -935,10 +934,6 @@ begin
 	end if;
 	if p_date < private.retention_start() then
 		perform private.fail('too_old');
-	end if;
-	-- The kitchen login: the same 7 days as servers' tips. The admin: any day.
-	if v_role = 'kitchen' and p_date < private.staff_edit_from() then
-		perform private.fail('locked');
 	end if;
 	if p_editor is not null then
 		select s.name into v_editor from private.servers s where s.id = p_editor and private.sees_team(v_role, s.team);
