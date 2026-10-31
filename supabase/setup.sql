@@ -361,6 +361,54 @@ as $$
 	select private.retention_start();
 $$;
 
+-- A date that can be saved: given, not in the future, and still kept.
+create or replace function private.check_date(p_date date)
+returns void
+language plpgsql
+stable
+set search_path = ''
+as $$
+begin
+	if p_date is null then
+		perform private.fail('invalid_date');
+	end if;
+	if p_date > private.today() then
+		perform private.fail('future_date');
+	end if;
+	if p_date < private.retention_start() then
+		perform private.fail('too_old');
+	end if;
+end;
+$$;
+
+-- A (cleaned) name that fits and is not used by anyone else (p_except: the person being renamed).
+create or replace function private.check_name(p_name text, p_except uuid default null)
+returns void
+language plpgsql
+stable
+set search_path = ''
+as $$
+begin
+	if char_length(p_name) not between 1 and 60 then
+		perform private.fail('invalid_name');
+	end if;
+	if exists (select 1 from private.servers s where lower(s.name) = lower(p_name) and s.id is distinct from p_except) then
+		perform private.fail('duplicate_name');
+	end if;
+end;
+$$;
+
+-- Has this person any hours (servers' shifts or the kitchen's)?
+create or replace function private.has_hours(p_id uuid)
+returns boolean
+language sql
+stable
+set search_path = ''
+as $$
+	select exists (select 1 from private.hours h where h.server_id = p_id)
+		or exists (select 1 from private.kitchen_hours k where k.server_id = p_id);
+$$;
+
 -- Can this role add or change the record of p_date right now?
 -- Staff (servers) and the admin: any day that is still kept, up to today.
 -- In the app a past day opens read-only until "Edit" is tapped (and "Done" closes it).
@@ -565,8 +613,6 @@ begin
 				'date', d.date,
 				'day_tips_cents', d.day_tips_cents,
 				'total_tips_cents', d.total_tips_cents,
-				'created_at', d.created_at,
-				'updated_at', d.updated_at,
 				'editable', private.can_edit(v_role, d.date)
 			) order by d.date)
 			from private.days d where d.date between p_from and p_to
@@ -630,15 +676,7 @@ declare
 	v_before_day jsonb;
 	v_before_night jsonb;
 begin
-	if p_date is null then
-		perform private.fail('invalid_date');
-	end if;
-	if p_date > private.today() then
-		perform private.fail('future_date');
-	end if;
-	if p_date < private.retention_start() then
-		perform private.fail('too_old');
-	end if;
+	perform private.check_date(p_date);
 	if not v_set_day and not v_set_night then
 		perform private.fail('invalid_hours'); -- nothing to save
 	end if;
@@ -792,12 +830,7 @@ begin
 	if not private.sees_team(v_role, v_team) then
 		perform private.fail('admin_only');
 	end if;
-	if char_length(v_name) not between 1 and 60 then
-		perform private.fail('invalid_name');
-	end if;
-	if exists (select 1 from private.servers s where lower(s.name) = lower(v_name)) then
-		perform private.fail('duplicate_name');
-	end if;
+	perform private.check_name(v_name);
 	insert into private.servers (name, team) values (v_name, v_team) returning id into v_id;
 	perform private.log(v_role, 'add_server', jsonb_build_object('id', v_id, 'name', v_name, 'team', v_team));
 	return private.server_json(v_id);
@@ -816,16 +849,11 @@ declare
 	v_old text;
 begin
 	perform private.require_admin(p_token);
-	if char_length(v_name) not between 1 and 60 then
-		perform private.fail('invalid_name');
-	end if;
 	select s.name into v_old from private.servers s where s.id = p_id for update;
 	if v_old is null then
 		perform private.fail('not_found');
 	end if;
-	if exists (select 1 from private.servers s where lower(s.name) = lower(v_name) and s.id <> p_id) then
-		perform private.fail('duplicate_name');
-	end if;
+	perform private.check_name(v_name, p_id);
 	update private.servers s set name = v_name where s.id = p_id;
 	perform private.log('admin', 'rename_server', jsonb_build_object('id', p_id, 'from', v_old, 'to', v_name));
 	return private.server_json(p_id);
@@ -859,8 +887,7 @@ declare
 	v_name text;
 begin
 	perform private.require_admin(p_token);
-	if exists (select 1 from private.hours h where h.server_id = p_id)
-		or exists (select 1 from private.kitchen_hours k where k.server_id = p_id) then
+	if private.has_hours(p_id) then
 		perform private.fail('server_has_hours');
 	end if;
 	delete from private.servers s where s.id = p_id returning s.name into v_name;
@@ -893,9 +920,7 @@ begin
 	if v_old is null then
 		perform private.fail('not_found');
 	end if;
-	if (p_team = 'server') <> (v_old = 'server') and (
-		exists (select 1 from private.hours h where h.server_id = p_id)
-		or exists (select 1 from private.kitchen_hours k where k.server_id = p_id)) then
+	if (p_team = 'server') <> (v_old = 'server') and private.has_hours(p_id) then
 		perform private.fail('team_has_hours');
 	end if;
 	update private.servers s set team = p_team where s.id = p_id;
@@ -926,15 +951,7 @@ begin
 	if v_role not in ('admin', 'kitchen') then
 		perform private.fail('admin_only');
 	end if;
-	if p_date is null then
-		perform private.fail('invalid_date');
-	end if;
-	if p_date > private.today() then
-		perform private.fail('future_date');
-	end if;
-	if p_date < private.retention_start() then
-		perform private.fail('too_old');
-	end if;
+	perform private.check_date(p_date);
 	if p_editor is not null then
 		select s.name into v_editor from private.servers s where s.id = p_editor and private.sees_team(v_role, s.team);
 	end if;

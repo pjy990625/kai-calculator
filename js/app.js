@@ -46,7 +46,7 @@
 	// hours — so leaving it can save first (restore: go back to it).
 	let entryForm = null;
 	const AUTOSAVE_MS = 1500;
-	// Typing that can still become a valid value (see readForm in the daily entry).
+	// Typing that can still become a valid value (see softValue).
 	const UNFINISHED_HOURS = /^\d{0,2}(?:[.,][27]?|:[0-5]?)$/; // 2. 2.2 2.7 5: 5:4
 	const UNFINISHED_MONEY = /^[\d,]*\d[.,]$/;               // 400. 400,
 
@@ -372,9 +372,6 @@
 		S.retentionStart = b.retention_start;
 		S.settings = b.settings;
 		S.servers = C.sortServers(b.servers || []); // always alphabetical
-		if ('settings' !== S.tab && MAIN_TABS.indexOf(S.tab) < 0) {
-			S.tab = MAIN_TABS[0];
-		}
 		if (!S.kitchenDate) {
 			S.kitchenDate = S.today;
 		}
@@ -530,23 +527,37 @@
 		syncTopbarHeight();
 	}
 
+	/**
+	 * Closes the open entry form before the page changes, saving what was typed
+	 * first. Returns false to stay (a past day still needs Done, or the user
+	 * chose to fix something: the side, tab and date are put back), else the
+	 * save to wait for (or null). `endEdit`: Done or Delete ends the edit here.
+	 */
+	function closeForm(endEdit) {
+		const form = entryForm;
+		if (!form) {
+			return null;
+		}
+		const wait = !endEdit && needsDone() ? false : form.leave();
+		if (false === wait) {
+			form.restore();
+			return false;
+		}
+		entryForm = null;
+		S.unlock = null;
+		return wait;
+	}
+
 	function render() {
-		// The entry form saves what was typed before it is replaced.
-		if (entryForm) {
-			const form = entryForm;
-			const wait = form.leave();
-			if (false === wait) {
-				// The user chose to stay and fix it: put the tab and date back.
-				form.restore();
-				renderShell();
-				return;
-			}
-			entryForm = null;
-			if (wait) {
-				renderShell();
-				wait.then(render);
-				return;
-			}
+		const wait = closeForm(false);
+		if (false === wait) {
+			renderShell();
+			return;
+		}
+		if (wait) {
+			renderShell();
+			wait.then(render);
+			return;
 		}
 		renderShell();
 		const seq = ++renderSeq;
@@ -597,7 +608,6 @@
 					date: d.date,
 					dayTips: Number(d.day_tips_cents),
 					totalTips: d.total_tips_cents === null ? null : Number(d.total_tips_cents),
-					editable: d.editable === true,
 				};
 			}),
 			hours: range.hours.map(function (h) {
@@ -724,33 +734,238 @@
 		return { node: node, set: set };
 	}
 
+	/**
+	 * A field's text for reading. `soft` (while typing): in the field being
+	 * typed in, a value that can still become right ("2." / "2.2" / "5:4" on
+	 * the way to 2.25 or 5:45, "400." on the way to 400.50) is unfinished, not
+	 * wrong: it is not marked red or saved, its whole-number part is used and
+	 * `out.typing` is set. Explicit saves (leaving a field, the date or the tab)
+	 * read it as wrong.
+	 */
+	function softValue(field, parse, unfinished, soft, out) {
+		const v = field.value.trim();
+		if (soft && field === document.activeElement && v !== '' && parse(v) === null && unfinished.test(v)) {
+			out.typing = true;
+			return v.replace(/[.,:]\d?$/, '');
+		}
+		return v;
+	}
+
+	/**
+	 * Auto-save of an entry form: 1.5 s after typing stops, and right away when
+	 * a field is left, the date or tab changes, or the app goes to the background.
+	 * The form says what is typed and how to send it:
+	 *   isDirty()            typed and not sent yet
+	 *   take() / giveBack(x) mark it sent (x = what was sent) / not sent after all
+	 *   clear()              forget it (the database closed the day)
+	 *   prepare(soft)        { typing } | { problem: {msg, focus} } | { send(x, keepalive) → promise }
+	 *   onSaved()            optional, after a save went through
+	 *   restore()            back to this form (side, tab, date)
+	 * Returns { input(field), stop(), bar, attach(form) → the entryForm object }.
+	 */
+	function autoSaver(o) {
+		let timer = null;
+		let inFlight = null;   // the save being sent
+		let again = false;     // typed while a save was being sent → save once more
+		let alive = true;      // false once this form is left
+		let blocked = null;    // why the typed values can't be saved yet ({msg, focus})
+		// Typing per field, so a field changed again while a save is on its way
+		// is not marked saved too early (see markField).
+		const edits = new Map();
+		const bar = saveBar(function () { saveNow(); });
+
+		function scheduleSave() {
+			clearTimeout(timer);
+			timer = setTimeout(function () { saveNow(false, true); }, AUTOSAVE_MS);
+			bar.set('saving');
+		}
+
+		/**
+		 * Save what was typed now. Returns the save's promise, or null if nothing was sent.
+		 * `soft` (auto-save while typing): wait while a field is unfinished ("2.").
+		 */
+		function saveNow(keepalive, soft) {
+			clearTimeout(timer);
+			timer = null;
+			if (inFlight) {
+				again = again || o.isDirty();
+				return inFlight;
+			}
+			if (!o.isDirty()) {
+				return null;
+			}
+			const p = o.prepare(soft);
+			if (p.typing) {
+				timer = setTimeout(function () { saveNow(false, true); }, AUTOSAVE_MS); // leaving the field saves it
+				return null;
+			}
+			blocked = p.problem || null;
+			if (blocked) {
+				bar.set('blocked', blocked.msg);
+				return null;
+			}
+			const sent = o.take();
+			bar.set('saving');
+			const sentEdits = new Map(edits);
+			inFlight = p.send(sent, !!keepalive).then(function () {
+				if (o.onSaved) {
+					o.onSaved();
+				}
+				sentEdits.forEach(function (n, field) {
+					if (edits.get(field) === n) {
+						edits.delete(field);
+						markField(field, 'saved');
+					}
+				});
+				if (!o.isDirty()) {
+					bar.set('saved');
+				}
+			}, function (e) {
+				o.giveBack(sent);
+				onError(e);
+			}).then(function () {
+				inFlight = null;
+				if (again && alive) {
+					again = false;
+					saveNow(false, true); // typed during the save: maybe still typing
+				}
+			});
+			return inFlight;
+		}
+
+		function onError(e) {
+			if (e && ('locked' === e.code || 'date_locked' === e.code)) {
+				// An older database closed the day: what was typed can't be saved.
+				o.clear();
+				again = false;
+				toast(t('err_locked'), 'error');
+				if (alive) {
+					closeForm(true);
+					refreshBootstrap().catch(function () {}).then(render);
+				}
+				return;
+			}
+			if (e && e.code === 'not_authenticated') {
+				handleError(e);
+				return;
+			}
+			if (alive) {
+				bar.set('failed', errMessage(e)); // e.g. no connection, or the database needs updating
+			} else {
+				toast(errMessage(e), 'error'); // the form is gone: say so instead
+			}
+		}
+
+		/**
+		 * Leaving this form (another date or tab). Saves what was typed first.
+		 * Returns false to stay (the user chose to fix something), a promise to
+		 * wait for, or null.
+		 */
+		function leave() {
+			saveNow();
+			if (blocked && o.isDirty() && !window.confirm(t('leaveUnsaved', { reason: blocked.msg }))) {
+				return false;
+			}
+			alive = false;
+			return inFlight;
+		}
+
+		return {
+			bar: bar,
+			/** A field was typed in (the form has marked what is dirty). */
+			input: function (field) {
+				edits.set(field, (edits.get(field) || 0) + 1);
+				markField(field, 'pending');
+				scheduleSave();
+			},
+			/** Stop waiting to save; returns the save being sent (if any). */
+			stop: function () {
+				clearTimeout(timer);
+				timer = null;
+				return inFlight;
+			},
+			attach: function (form) {
+				form.addEventListener('submit', function (ev) {
+					ev.preventDefault(); // Enter / the keyboard's Go key saves now
+					saveNow();
+				});
+				// Leaving a field saves it right away (no need to wait 1.5 s).
+				form.addEventListener('focusout', function () {
+					if (timer) {
+						saveNow();
+					}
+				});
+				return { flush: saveNow, leave: leave, restore: o.restore, unsaved: o.isDirty };
+			},
+		};
+	}
+
+	/** An hours field of an entry form. */
+	function hoursInput(label, value, disabled, oninput) {
+		return el('input', {
+			type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0',
+			'aria-label': label + ' ' + t('hours'),
+			value: value, disabled: disabled, oninput: oninput,
+		});
+	}
+
+	/** One person's row in an hours table: name, hours field, tips. */
+	function hoursRow(person, input, share) {
+		return el('tr', null, [
+			el('td', { class: 'name' }, [person.name, person.active ? null : el('span', { class: 'tag', text: t('inactiveTag') })]),
+			el('td', { class: 'hours-cell' }, input),
+			share,
+		]);
+	}
+
+	/** The hours table of an entry form. `foot`: {hours, share} cells of the total row. */
+	function hoursTable(nameLabel, rows, foot) {
+		return el('div', { class: 'table-wrap' }, el('table', { class: 'grid entry-grid' }, [
+			// Fixed column widths: typing hours must never move the hours column.
+			el('colgroup', null, [el('col', { class: 'col-name' }), el('col', { class: 'col-hours' }), el('col', { class: 'col-share' })]),
+			el('thead', null, el('tr', null, [
+				el('th', { text: nameLabel }),
+				el('th', { text: t('hours') }),
+				el('th', { class: 'num', text: t('share') }),
+			])),
+			el('tbody', null, rows),
+			el('tfoot', null, el('tr', null, [el('th', { text: t('total') }), foot.hours, foot.share])),
+		]));
+	}
+
+	/** "Nobody yet" in an entry form, with a button to the staff tab. */
+	function noStaffNotice(msgKey, btnKey) {
+		return el('p', { class: 'notice warn' }, [
+			t(msgKey) + ' ',
+			el('button', { type: 'button', class: 'btn small', onclick: function () { S.tab = 'staff'; render(); } }, t(btnKey)),
+		]);
+	}
+
 	/* ------------------------------------------------------------------ */
 	/* Entry tab — one date. Day tips and night tips each have their own   */
 	/* tab inside the card, and each shift is saved separately.            */
 	/* ------------------------------------------------------------------ */
 
 	/** Why the selected date can't be edited (null = editable). */
-	function lockReason(date, rec) {
+	function lockReason(date) {
 		if (date > S.today) {
 			return t('lockFuture');
 		}
 		if (S.retentionStart && date < S.retentionStart) {
 			return t('lockTooOld', { months: S.settings.retention_months });
 		}
-		// Saved records: the database says. Any other kept date can be added.
-		const editable = rec ? rec.editable : true;
-		return editable ? null : t('lockClosed');
+		return null;
 	}
 
 	/**
 	 * A past day opens read-only so it can't be changed by a stray tap. "Edit"
 	 * (see editButton) opens it until Done is tapped; leaving it before that is
-	 * blocked (see needsDone).
-	 * `locked`: lockReason (null = the date can be changed at all).
+	 * blocked (see closeForm).
 	 */
-	function dayLock(date, locked) {
+	function dayLock(date) {
+		const locked = lockReason(date);
 		if (S.unlock && S.unlock.date !== date) {
-			S.unlock = null; // safety net: needsDone keeps the user on the date
+			S.unlock = null; // safety net: closeForm keeps the user on the date
 		}
 		const guarded = !locked && date < S.today && !S.unlock;
 		return { locked: locked, unlocked: !!S.unlock, guarded: guarded, readOnly: !!locked || guarded };
@@ -758,17 +973,9 @@
 
 	/**
 	 * The Edit button of a locked past day (see dayLock), shown in the date row
-	 * where Today is. Confirm, and the form opens for editing until Done is
-	 * tapped. null when there is nothing to open; false while the day is being
-	 * edited (no Today button either: Done comes first).
+	 * where Today is. Confirm, and the form opens for editing until Done is tapped.
 	 */
-	function editButton(date, lock) {
-		if (lock.unlocked) {
-			return false;
-		}
-		if (!lock.guarded) {
-			return null;
-		}
+	function editButton(date) {
 		return el('button', {
 			type: 'button',
 			class: 'btn primary small',
@@ -784,9 +991,9 @@
 
 	/**
 	 * The line under the date (see dayLock): why it is locked, or that a past
-	 * day is being changed (with Done). `leave` saves what was typed first.
+	 * day is being changed (with Done, which saves what was typed first).
 	 */
-	function dayStatus(lock, leave) {
+	function dayStatus(lock) {
 		if (lock.locked) {
 			return el('p', { class: 'notice lock', text: '🔒 ' + lock.locked });
 		}
@@ -798,15 +1005,11 @@
 			el('button', { type: 'button', class: 'btn primary small', id: 'edit-done', onclick: function () {
 				// Save what was typed, then lock the day again.
 				// (Its tab is picked again: a finished day opens on Summary.)
-				const unlock = S.unlock;
-				S.unlock = null; // so leave() is not blocked by needsDone
-				const r = leave();
-				if (false === r) {
-					S.unlock = unlock; // the user chose to stay and fix something
-					return;
+				const wait = closeForm(true);
+				if (false !== wait) {
+					S.entryShiftDate = null;
+					Promise.resolve(wait).then(render);
 				}
-				S.entryShiftDate = null;
-				Promise.resolve(r).then(render);
 			} }, t('editDone')),
 		]);
 	}
@@ -840,7 +1043,7 @@
 	}
 
 	function renderDayForm(date, rec, input) {
-		const lock = dayLock(date, lockReason(date, rec));
+		const lock = dayLock(date);
 		const readOnly = lock.readOnly;
 		const pct = S.settings.server_pct;
 		const myHours = input.hours.filter(function (h) { return h.date === date; });
@@ -852,7 +1055,8 @@
 			return s.active || myHours.some(function (h) { return h.serverId === s.id; });
 		});
 
-		// Which tab has been typed in and not saved yet.
+		// Which tab has been typed in and not saved yet. Only those are sent;
+		// an untouched tab keeps what the database has (maybe newer, from another phone).
 		const dirty = { day: false, night: false };
 		function isDirty() {
 			return dirty.day || dirty.night;
@@ -864,16 +1068,10 @@
 		function onInput(shift) {
 			return function (e) {
 				dirty[shift] = true;
-				edits.set(e.target, (edits.get(e.target) || 0) + 1);
-				markField(e.target, 'pending');
 				update();
-				scheduleSave();
+				saver.input(e.target);
 			};
 		}
-
-		// `edits` counts typing per field so a field changed again while a save
-		// is on its way is not marked saved too early (see markField).
-		const edits = new Map();
 
 		const dayTipsInput = el('input', {
 			id: 'day-tips', type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0.00',
@@ -897,57 +1095,22 @@
 		});
 
 		/** One tab's table: server, hours for that shift, tips. */
-		function hoursTable(shift, shareLabel) {
+		function shiftTable(shift) {
 			if (!servers.length) {
-				return el('p', { class: 'notice warn' }, [
-					t('noServersYet') + ' ',
-					el('button', { type: 'button', class: 'btn small', onclick: function () { S.tab = 'staff'; render(); } }, t('goToServers')),
-				]);
+				return noStaffNotice('noServersYet', 'goToServers');
 			}
-			return el('div', { class: 'table-wrap' }, el('table', { class: 'grid entry-grid' }, [
-				// Fixed column widths: typing hours must never move the hours column.
-				el('colgroup', null, [el('col', { class: 'col-name' }), el('col', { class: 'col-hours' }), el('col', { class: 'col-share' })]),
-				el('thead', null, el('tr', null, [
-					el('th', { text: t('server') }),
-					el('th', { text: t('hours') }),
-					el('th', { class: 'num', text: shareLabel }),
-				])),
-				el('tbody', null, servers.map(function (s) {
-					inputs[shift][s.id] = el('input', {
-						type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0',
-						'aria-label': s.name + ' ' + t(shift) + ' ' + t('hours'),
-						value: savedHours(s.id, shift), disabled: readOnly, oninput: onInput(shift),
-					});
-					shareCells[shift][s.id] = el('td', { class: 'num share' }, '—');
-					return el('tr', null, [
-						el('td', { class: 'name' }, [s.name, s.active ? null : el('span', { class: 'tag', text: t('inactiveTag') })]),
-						el('td', { class: 'hours-cell' }, inputs[shift][s.id]),
-						shareCells[shift][s.id],
-					]);
-				})),
-				el('tfoot', null, el('tr', null, [el('th', { text: t('total') }), foot[shift].hours, foot[shift].share])),
-			]));
+			return hoursTable(t('server'), servers.map(function (s) {
+				inputs[shift][s.id] = hoursInput(s.name + ' ' + t(shift), savedHours(s.id, shift), readOnly, onInput(shift));
+				shareCells[shift][s.id] = el('td', { class: 'num share' }, '—');
+				return hoursRow(s, inputs[shift][s.id], shareCells[shift][s.id]);
+			}), foot[shift]);
 		}
 
-		/**
-		 * The form's values. `soft` (while typing): in the field being typed in,
-		 * a value that can still become right ("2." / "2.2" / "5:4" on the way to
-		 * 2.25 or 5:45, "400." on the way to 400.50) is unfinished, not wrong. It
-		 * is not marked red or saved, and the amounts use its whole-number part.
-		 * Explicit saves (leaving a field, the date or the tab) read it as wrong.
-		 */
+		/** The form's values (`soft`: see softValue). */
 		function readForm(soft) {
 			const out = { bad: { day: [], night: [] }, hours: { day: [], night: [] }, weights: { day: [], night: [] }, typing: false };
-			function raw(field, parse, unfinished) {
-				const v = field.value.trim();
-				if (soft && field === document.activeElement && v !== '' && parse(v) === null && unfinished.test(v)) {
-					out.typing = true;
-					return v.replace(/[.,:]\d?$/, '');
-				}
-				return v;
-			}
-			const dayRaw = raw(dayTipsInput, C.parseMoney, UNFINISHED_MONEY);
-			const totalRaw = raw(totalInput, C.parseMoney, UNFINISHED_MONEY);
+			const dayRaw = softValue(dayTipsInput, C.parseMoney, UNFINISHED_MONEY, soft, out);
+			const totalRaw = softValue(totalInput, C.parseMoney, UNFINISHED_MONEY, soft, out);
 			out.dayTips = dayRaw === '' ? null : C.parseMoney(dayRaw);
 			out.dayTipsInvalid = dayRaw !== '' && out.dayTips === null;
 			out.totalTips = totalRaw === '' ? null : C.parseMoney(totalRaw);
@@ -957,7 +1120,7 @@
 			C.SHIFTS.forEach(function (shift) {
 				servers.forEach(function (s) {
 					const field = inputs[shift][s.id];
-					const text = raw(field, C.parseHours, UNFINISHED_HOURS);
+					const text = softValue(field, C.parseHours, UNFINISHED_HOURS, soft, out);
 					const v = text === '' ? 0 : C.parseHours(text);
 					field.classList.toggle('invalid', v === null);
 					if (v === null) {
@@ -1004,11 +1167,12 @@
 			foot.night.share.textContent = nightOk ? money(n.paid) : '—';
 			leftoverOut.night.textContent = nightOk && n.leftover > 0 ? t('leftoverLine', { amount: money(n.leftover) }) : '';
 
-			drawSummary(f, dayOk, nightOk);
+			if (!panels.sum.hidden) {
+				drawSummary(f, dayOk, nightOk); // only while it is shown (see showShift)
+			}
 		}
 
 		/** Summary tab: the whole day as typed (saved or not), like the old daily report. */
-		const sumPanel = el('div', { id: 'shift-panel-sum', class: 'shift-panel', role: 'tabpanel', 'aria-labelledby': 'shift-tab-sum' });
 		function drawSummary(f, dayOk, nightOk) {
 			const hours = [];
 			C.SHIFTS.forEach(function (shift) {
@@ -1022,16 +1186,7 @@
 				days: [{ date: date, dayTips: dayOk ? f.dayTips || 0 : 0, totalTips: nightOk ? f.totalTips : null }],
 				hours: hours,
 			}, date, date);
-			const tot = s.totals;
-			sumPanel.replaceChildren(
-				el('div', { class: 'cards' }, [
-					statCard(t('cardTotalTips'), money(tot.tips), ''),
-					statCard(t('cardServers', { pct: s.serverPct }), money(tot.pool), 'accent'),
-					statCard(t('cardKitchen', { pct: 100 - s.serverPct }), money(tot.kitchen), ''),
-					statCard(t('cardHours'), C.formatHours(tot.hours), ''),
-				]),
-				dailyTable(s)
-			);
+			panels.sum.replaceChildren(el('div', { class: 'cards' }, serverCards(s)), dailyTable(s));
 		}
 
 		function firstBadHours(shift) {
@@ -1069,22 +1224,6 @@
 			return null;
 		}
 
-		/* Auto-save: 1.5 s after typing stops, and right away when a field is
-		 * left, the date or tab changes, or the app goes to the background.
-		 * Only the tabs typed in are sent; an untouched tab keeps what the
-		 * database has (maybe newer, from another phone). */
-		let timer = null;
-		let inFlight = null;   // the save being sent
-		let again = false;     // typed while a save was being sent → save once more
-		let alive = true;      // false once this form is replaced
-		let blocked = null;    // why the typed values can't be saved yet
-
-		function scheduleSave() {
-			clearTimeout(timer);
-			timer = setTimeout(function () { saveNow(false, true); }, AUTOSAVE_MS);
-			setStatus('saving');
-		}
-
 		/** The first problem in the tabs being saved, active tab first. */
 		function firstProblem(f, saving) {
 			const order = 'day' === S.entryShift ? ['day', 'night'] : ['night', 'day'];
@@ -1097,127 +1236,54 @@
 			return null;
 		}
 
-		/**
-		 * Save what was typed now. Returns the save's promise, or null if nothing was sent.
-		 * `soft` (auto-save while typing): wait while a field is unfinished ("2.").
-		 */
-		function saveNow(keepalive, soft) {
-			clearTimeout(timer);
-			timer = null;
-			if (inFlight) {
-				again = again || isDirty();
-				return inFlight;
-			}
-			if (!isDirty()) {
-				return null;
-			}
-			const f = readForm(soft);
-			if (f.typing) {
-				timer = setTimeout(function () { saveNow(false, true); }, AUTOSAVE_MS); // leaving the field saves it
-				return null;
-			}
-			const sent = { day: dirty.day, night: dirty.night };
-			const problem = firstProblem(f, sent);
-			blocked = problem;
-			if (problem) {
-				setStatus('blocked', problem.msg);
-				return null;
-			}
-			clearDirty();
-			setStatus('saving');
-			const sentEdits = new Map(edits);
-			inFlight = API.rpc('save_shifts', {
-				p_token: S.token,
-				p_date: date,
-				p_day_tips_cents: sent.day ? f.dayTips : null,
-				p_day_hours: sent.day ? f.hours.day : null,
-				p_total_tips_cents: sent.night ? f.totalTips : null,
-				p_night_hours: sent.night ? f.hours.night : null,
-			}, { keepalive: !!keepalive }).then(function () {
-				actionsRow.hidden = false; // the record exists now: it can be deleted
-				sentEdits.forEach(function (n, field) {
-					if (edits.get(field) === n) {
-						edits.delete(field);
-						markField(field, 'saved');
-					}
-				});
-				if (!isDirty()) {
-					setStatus('saved');
-				}
-			}, function (e) {
+		const saver = autoSaver({
+			isDirty: isDirty,
+			take: function () {
+				const sent = { day: dirty.day, night: dirty.night };
+				clearDirty();
+				return sent;
+			},
+			giveBack: function (sent) {
 				dirty.day = dirty.day || sent.day;
 				dirty.night = dirty.night || sent.night;
-				onSaveError(e);
-			}).then(function () {
-				inFlight = null;
-				if (again && alive) {
-					again = false;
-					saveNow(false, true); // typed during the save: maybe still typing
+			},
+			clear: clearDirty,
+			prepare: function (soft) {
+				const f = readForm(soft);
+				if (f.typing) {
+					return { typing: true };
 				}
-			});
-			return inFlight;
-		}
-
-		function onSaveError(e) {
-			if (e && ('locked' === e.code || 'date_locked' === e.code)) {
-				// The database closed the day (e.g. it is no longer kept).
-				clearDirty();
-				again = false;
-				toast(t('err_locked'), 'error');
-				S.unlock = null; // nothing left to finish
-				if (alive) {
-					refreshBootstrap().catch(function () {}).then(render);
-				}
-				return;
-			}
-			if (e && e.code === 'not_authenticated') {
-				handleError(e);
-				return;
-			}
-			if (alive) {
-				setStatus('failed', errMessage(e)); // e.g. no connection, or the database needs updating
-			} else {
-				toast(errMessage(e), 'error'); // the form is gone: say so instead
-			}
-		}
-
-		/** One save bar for both tabs; it stays in view under the header while scrolling. */
-		const bar = saveBar(function () { saveNow(); });
-		const statusBar = bar.node;
-		const setStatus = bar.set;
-
-		/**
-		 * Leaving this form (another date or tab). Saves what was typed first.
-		 * Returns false to stay (the user chose to fix something), a promise to
-		 * wait for, or null.
-		 */
-		function leave() {
-			saveNow();
-			if (needsDone()) {
-				dateInput.value = date;
-				return false;
-			}
-			if (blocked && isDirty() && !window.confirm(t('leaveUnsaved', { reason: blocked.msg }))) {
-				dateInput.value = date;
-				return false;
-			}
-			alive = false;
-			return inFlight;
-		}
-
-		function onSubmit(ev) {
-			ev.preventDefault(); // Enter / the keyboard's Go key saves now
-			saveNow();
-		}
+				return {
+					problem: firstProblem(f, dirty),
+					send: function (sent, keepalive) {
+						return API.rpc('save_shifts', {
+							p_token: S.token,
+							p_date: date,
+							p_day_tips_cents: sent.day ? f.dayTips : null,
+							p_day_hours: sent.day ? f.hours.day : null,
+							p_total_tips_cents: sent.night ? f.totalTips : null,
+							p_night_hours: sent.night ? f.hours.night : null,
+						}, { keepalive: keepalive });
+					},
+				};
+			},
+			onSaved: function () {
+				actionsRow.hidden = false; // the record exists now: it can be deleted
+			},
+			restore: function () {
+				S.side = 'server';
+				S.tab = 'entry';
+				S.entryDate = date;
+				picker.input.value = date;
+			},
+		});
 
 		async function onDelete() {
-			clearTimeout(timer);
+			saver.stop();
 			if (!window.confirm(t('confirmDeleteDay', { date: niceDate(date, true) }))) {
 				return;
 			}
-			if (inFlight) {
-				await inFlight; // don't let a late save bring the record back
-			}
+			await saver.stop(); // don't let a late save bring the record back
 			try {
 				await API.rpc('delete_day', { p_token: S.token, p_date: date });
 			} catch (e) {
@@ -1225,21 +1291,19 @@
 				return;
 			}
 			clearDirty();
-			S.unlock = null; // deleting ends the edit
+			closeForm(true); // deleting ends the edit
 			toast(t('deleted'));
 			render();
 		}
 
-		let dateInput = null;
 		// Changes save themselves, so the only action is Delete (once there is a record).
 		const actionsRow = el('div', { class: 'row actions', hidden: !rec }, [
 			el('button', { type: 'button', class: 'btn danger ghost', onclick: onDelete }, t('delete')),
 		]);
 
-		const status = dayStatus(lock, leave);
-
-		// The two tabs. Both panels stay in the page (one hidden), so switching
+		// The tabs. All panels stay in the page (the others hidden), so switching
 		// tabs never throws away what was typed.
+		const TABS = ['day', 'night', 'sum'];
 		const tabButtons = {};
 		const panels = {
 			day: el('div', { id: 'shift-panel-day', class: 'shift-panel', role: 'tabpanel', 'aria-labelledby': 'shift-tab-day' }, [
@@ -1247,7 +1311,7 @@
 					el('label', { class: 'field' }, [el('span', { text: t('dayTips') }), dayTipsInput]),
 				]),
 				leftoverOut.day,
-				hoursTable('day', t('share')),
+				shiftTable('day'),
 			]),
 			night: el('div', { id: 'shift-panel-night', class: 'shift-panel', role: 'tabpanel', 'aria-labelledby': 'shift-tab-night' }, [
 				el('div', { class: 'tips-grid' }, [
@@ -1256,9 +1320,9 @@
 				]),
 				totalHint,
 				leftoverOut.night,
-				hoursTable('night', t('share')),
+				shiftTable('night'),
 			]),
-			sum: sumPanel,
+			sum: el('div', { id: 'shift-panel-sum', class: 'shift-panel', role: 'tabpanel', 'aria-labelledby': 'shift-tab-sum' }),
 		};
 		const hoursHelp = el('p', { class: 'muted small', text: t('hoursHelp') });
 		function showShift(shift) {
@@ -1271,21 +1335,22 @@
 			});
 			hoursHelp.hidden = 'sum' === shift;
 		}
-		const TABS = ['day', 'night', 'sum'];
 		const tabLabels = { day: '☀ ' + t('dayTab'), night: '☾ ' + t('nightTab'), sum: t('summaryTab') };
 		TABS.forEach(function (k) {
 			tabButtons[k] = el('button', {
 				type: 'button', role: 'tab', id: 'shift-tab-' + k, class: 'shift-tab ' + k, 'aria-controls': 'shift-panel-' + k,
-				onclick: function () { showShift(k); },
+				onclick: function () {
+					showShift(k);
+					update(); // draws the Summary when it is opened
+				},
 			}, tabLabels[k]);
 		});
 
-		const picker = dayPicker(date, function (d) { S.entryDate = d; render(); }, editButton(date, lock));
-		dateInput = picker.input;
-		const form = el('form', { class: 'card narrow', onsubmit: onSubmit, novalidate: true }, [
+		const picker = dayPicker(date, function (d) { S.entryDate = d; render(); }, lock);
+		const form = el('form', { class: 'card narrow', novalidate: true }, [
 			picker.node,
-			status,
-			readOnly ? null : statusBar,
+			dayStatus(lock),
+			readOnly ? null : saver.bar.node, // stays in view under the header while scrolling
 			el('div', { class: 'shift-tabs', role: 'tablist', 'aria-label': t('entryTitle') }, [tabButtons.day, tabButtons.night, tabButtons.sum]),
 			panels.day,
 			panels.night,
@@ -1293,22 +1358,8 @@
 			hoursHelp,
 			readOnly ? null : actionsRow,
 		]);
-		// Leaving a field saves it right away (no need to wait 1.5 s).
-		form.addEventListener('focusout', function () {
-			if (timer) {
-				saveNow();
-			}
-		});
-		entryForm = readOnly ? null : {
-			flush: saveNow,
-			leave: leave,
-			restore: function () {
-				S.side = 'server';
-				S.tab = 'entry';
-				S.entryDate = date;
-			},
-			unsaved: isDirty, // typed but not sendable
-		};
+		const opened = saver.attach(form);
+		entryForm = readOnly ? null : opened;
 		// Opening a date picks its tab: nothing saved → Day tips; the whole day
 		// saved → Summary; only the day saved → the tab that was open. Redraws
 		// of the same date (e.g. coming back from another tab) keep the tab the user is on.
@@ -1322,16 +1373,22 @@
 		}
 		showShift(S.entryShift);
 		update();
-		setStatus(rec ? 'stored' : 'idle');
+		saver.bar.set(rec ? 'stored' : 'idle');
 		return form;
 	}
 
 	/**
 	 * ‹ calendar › for one day plus a Today button (Daily entry). Future dates
-	 * cannot be picked. `action` (e.g. Edit of a locked past day) takes Today's
-	 * place; false: neither (see editButton).
+	 * cannot be picked. A locked past day has Edit in Today's place, and a day
+	 * being edited has neither (Done comes first). `lock`: see dayLock.
 	 */
-	function dayPicker(date, onPick, action) {
+	function dayPicker(date, onPick, lock) {
+		let action = null;
+		if (lock.guarded) {
+			action = editButton(date);
+		} else if (!lock.unlocked && date !== S.today) {
+			action = el('button', { type: 'button', class: 'btn small', onclick: function () { onPick(S.today); } }, t('today'));
+		}
 		const input = el('input', {
 			type: 'date', class: 'date-input', value: date, max: S.today, required: true, 'aria-label': t('date'),
 			onchange: function (e) {
@@ -1352,7 +1409,7 @@
 					input,
 					el('button', { type: 'button', class: 'btn small ghost', 'aria-label': t('nextDay'), disabled: date >= S.today, onclick: function () { onPick(C.addDays(date, 1)); } }, '›'),
 				]),
-				false === action ? null : action || (date !== S.today ? el('button', { type: 'button', class: 'btn small', onclick: function () { onPick(S.today); } }, t('today')) : null),
+				action,
 			]),
 		};
 	}
@@ -1366,15 +1423,16 @@
 		return 'month' === kind ? C.monthRange(C.monthKey(date)) : C.payPeriodFor(date);
 	}
 
-	/** Period switch + ‹ range › navigation, shared by Reports and one server's view. */
-	function rangeControls(kind, r, onKind, onDate) {
+	/** Period switch + ‹ range › navigation (S.reportKind / S.reportDate), shared by Reports and one person's view. */
+	function rangeControls(r) {
 		const kinds = [{ value: 'period', label: t('reportPeriod') }, { value: 'month', label: t('reportMonth') }];
-		const isMonth = 'month' === kind;
+		const isMonth = 'month' === S.reportKind;
 		function move(n) {
-			onDate(isMonth ? C.shiftMonth(C.monthKey(r.from), n) + '-01' : C.shiftPayPeriod(r.from, n).from);
+			S.reportDate = isMonth ? C.shiftMonth(C.monthKey(r.from), n) + '-01' : C.shiftPayPeriod(r.from, n).from;
+			render();
 		}
 		return [
-			segmented(kinds, kind, onKind),
+			segmented(kinds, S.reportKind, function (v) { S.reportKind = v; render(); }),
 			el('div', { class: 'row nav' }, [
 				el('button', { type: 'button', class: 'btn ghost', 'aria-label': t('prev'), onclick: function () { move(-1); } }, '‹'),
 				el('strong', { text: isMonth ? monthLabel(C.monthKey(r.from)) : rangeLabel(r.from, r.to) }),
@@ -1394,46 +1452,64 @@
 		});
 	}
 
-	/** A date in Reports → that day's Summary tab in Daily entry. */
-	function openDay(date) {
-		S.tab = 'entry';
-		S.entryDate = date;
-		S.entryShift = 'sum';
-		S.entryShiftDate = date; // keep Summary (don't pick a tab for this date)
+	/** Change the view (`change` sets S), draw it, and start at the top. */
+	function go(change) {
+		change();
 		render();
 		window.scrollTo(0, 0);
+	}
+
+	/** A date in Reports → that day's Summary tab in Daily entry. */
+	function openDay(date) {
+		go(function () {
+			S.tab = 'entry';
+			S.entryDate = date;
+			S.entryShift = 'sum';
+			S.entryShiftDate = date; // keep Summary (don't pick a tab for this date)
+		});
+	}
+
+	/**
+	 * A report card (servers or kitchen): print heading, period controls,
+	 * `cards`, the retention notice, `body`, then CSV / print.
+	 */
+	function reportCard(s, r, titlePrefix, cards, body, onCsv) {
+		const isMonth = 'month' === S.reportKind;
+		return el('section', { class: 'card report' }, [
+			// The on-screen period controls are not printed, so print gets its own heading.
+			el('header', { class: 'report-head print-only' }, [
+				S.settings.restaurant_name ? el('p', { class: 'eyebrow', text: S.settings.restaurant_name }) : null,
+				el('h2', { text: titlePrefix + (isMonth ? monthLabel(s.from.slice(0, 7)) : rangeLabel(s.from, s.to)) }),
+				isMonth ? el('p', { class: 'muted', text: rangeLabel(s.from, s.to) }) : null,
+			]),
+			el('div', { class: 'range-bar no-print' }, rangeControls(r)),
+			el('div', { class: 'cards' }, cards),
+			S.retentionStart && s.from < S.retentionStart
+				? el('div', { class: 'notice warn', text: t('retentionNote', { months: S.settings.retention_months, date: niceDate(S.retentionStart) }) })
+				: null,
+			body,
+			el('div', { class: 'row actions no-print' }, [
+				el('button', { type: 'button', class: 'btn', onclick: onCsv }, t('downloadCsv')),
+				el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
+			]),
+		]);
+	}
+
+	/** The servers' four totals (Reports and the daily Summary tab). */
+	function serverCards(s) {
+		const tot = s.totals;
+		return [
+			statCard(t('cardTotalTips'), money(tot.tips), ''),
+			statCard(t('cardServers', { pct: s.serverPct }), money(tot.pool), 'accent'),
+			statCard(t('cardKitchen', { pct: 100 - s.serverPct }), money(tot.kitchen), ''),
+			statCard(t('cardHours'), C.formatHours(tot.hours), ''),
+		];
 	}
 
 	/** One card: period controls, totals, notices, the tables, CSV / print. */
 	function renderReportBody(s, r) {
 		const tot = s.totals;
-		const kind = S.reportKind;
-		let title = rangeLabel(s.from, s.to);
-		if ('month' === kind) {
-			title = monthLabel(s.from.slice(0, 7));
-		}
-		const parts = [
-			// The on-screen period controls are not printed, so print gets its own heading.
-			el('header', { class: 'report-head print-only' }, [
-				S.settings.restaurant_name ? el('p', { class: 'eyebrow', text: S.settings.restaurant_name }) : null,
-				el('h2', { text: title }),
-				'month' === kind ? el('p', { class: 'muted', text: rangeLabel(s.from, s.to) }) : null,
-			]),
-			el('div', { class: 'range-bar no-print' }, rangeControls(kind, r,
-				function (v) { S.reportKind = v; render(); },
-				function (d) { S.reportDate = d; render(); }
-			)),
-			el('div', { class: 'cards' }, [
-				statCard(t('cardTotalTips'), money(tot.tips), ''),
-				statCard(t('cardServers', { pct: s.serverPct }), money(tot.pool), 'accent'),
-				statCard(t('cardKitchen', { pct: 100 - s.serverPct }), money(tot.kitchen), ''),
-				statCard(t('cardHours'), C.formatHours(tot.hours), ''),
-			]),
-		];
-
-		if (S.retentionStart && s.from < S.retentionStart) {
-			parts.push(el('div', { class: 'notice warn', text: t('retentionNote', { months: S.settings.retention_months, date: niceDate(S.retentionStart) }) }));
-		}
+		const parts = [];
 		s.warnings.forEach(function (w) {
 			if ('missingTotal' === w.type && w.date === S.today) {
 				return; // normal until closing: the table already shows "missing"
@@ -1447,17 +1523,15 @@
 		});
 
 		parts.push(el('h3', { class: 'section-title', text: t('perPersonTitle') }));
-		parts.push(s.rows.length ? personTable(s.rows, tot) : el('p', { class: 'muted', text: t('noData') }));
+		parts.push(s.rows.length
+			? personTable(t('server'), s.rows, { tips: tot.serverTips, hours: tot.hours }, false, function (x) { openPerson(x.id); })
+			: el('p', { class: 'muted', text: t('noData') }));
 		if (s.days.length) {
 			parts.push(el('h3', { class: 'section-title', text: t('perDayTitle') }));
 			parts.push(el('p', { class: 'muted small no-print', text: t('perDayHelp') }));
 			parts.push(dayTable(s));
 		}
-		parts.push(el('div', { class: 'row actions no-print' }, [
-			el('button', { type: 'button', class: 'btn', onclick: function () { downloadCsv(s); } }, t('downloadCsv')),
-			el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
-		]));
-		return el('section', { class: 'card report' }, parts);
+		return reportCard(s, r, '', serverCards(s), parts, function () { downloadCsv(s); });
 	}
 
 	function statCard(label, value, kind) {
@@ -1467,44 +1541,59 @@
 		]);
 	}
 
-	function personTable(rows, tot) {
-		function cells(r, tag) {
-			// Most important first so it is visible on phones without scrolling.
+	/** A person's name ("(removed)" once they were deleted). */
+	function personName(x) {
+		return x.name || t('unknownServer');
+	}
+
+	/** A person's name that opens their view (plain text once they were deleted). */
+	function personLink(x, onOpen) {
+		const name = personName(x);
+		return x.name ? el('button', { type: 'button', class: 'link', title: t('openPerson', { name: name }), onclick: onOpen }, name) : name;
+	}
+
+	/** A date that opens that day (`titleKey`: its tooltip). */
+	function dateLink(date, titleKey, onOpen) {
+		const label = niceDate(date, true);
+		return el('button', { type: 'button', class: 'link', title: t(titleKey, { date: label }), onclick: onOpen }, label);
+	}
+
+	/**
+	 * Per person: name, tips, hours (most important first so it is visible on
+	 * phones without scrolling), then the total. `grouped`: by kitchen team.
+	 */
+	function personTable(nameLabel, rows, total, grouped, onOpen) {
+		function cells(x, tag) {
 			return [
-				el(tag, { class: 'num strong', text: money(r.tips) }),
-				el(tag, { class: 'num', text: C.formatHours(r.hours) }),
+				el(tag, { class: 'num strong', text: money(x.tips) }),
+				el(tag, { class: 'num', text: C.formatHours(x.hours) }),
 			];
+		}
+		function row(x) {
+			return el('tr', null, [el('td', { class: 'name' }, personLink(x, function () { onOpen(x); }))].concat(cells(x, 'td')));
 		}
 		return el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
 			el('thead', null, el('tr', null, [
-				el('th', { text: t('server') }),
+				el('th', { text: nameLabel }),
 				el('th', { class: 'num', text: t('colTips') }),
 				el('th', { class: 'num', text: t('colHours') }),
 			])),
-			el('tbody', null, rows.map(function (r) {
-				const name = r.name || t('unknownServer');
-				return el('tr', null, [el('td', { class: 'name' }, r.name ? el('button', {
-					type: 'button',
-					class: 'link',
-					title: t('openPerson', { name: name }),
-					onclick: function () { openPerson(r.id); },
-				}, name) : name)].concat(cells(r, 'td')));
-			})),
-			el('tfoot', null, el('tr', null, [el('th', { text: t('total') })].concat(cells({
-				tips: tot.serverTips, hours: tot.hours,
-			}, 'th')))),
+			el('tbody', null, grouped ? kitchenGroups(rows).map(function (g) {
+				return [groupRow(g.team, 3)].concat(g.list.map(row));
+			}) : rows.map(row)),
+			el('tfoot', null, el('tr', null, [el('th', { text: t('total') })].concat(cells(total, 'th')))),
 		]));
 	}
 
 	/** Reports → one server's hours day by day, for the same range (or the period containing `date`). */
 	function openPerson(id, date) {
-		S.tab = 'report';
-		if (date) {
-			S.reportDate = date;
-		}
-		S.personId = id;
-		render();
-		window.scrollTo(0, 0);
+		go(function () {
+			S.tab = 'report';
+			if (date) {
+				S.reportDate = date;
+			}
+			S.personId = id;
+		});
 	}
 
 	/** Per-day totals; tapping a date opens that day's Summary in Daily entry. */
@@ -1521,14 +1610,8 @@
 				el('th', { class: 'num', text: t('colLeftover') }),
 			])),
 			el('tbody', null, s.days.map(function (d) {
-				const label = niceDate(d.date, true);
 				return el('tr', null, [
-					el('td', { class: 'name' }, el('button', {
-						type: 'button',
-						class: 'link',
-						title: t('openDay', { date: label }),
-						onclick: function () { openDay(d.date); },
-					}, label)),
+					el('td', { class: 'name' }, dateLink(d.date, 'openDay', function () { openDay(d.date); })),
 					el('td', { class: 'num strong', text: d.totalTips === null ? t('missing') : money(d.totalTips) }),
 					el('td', { class: 'num day-col', text: money(d.dayTips) }),
 					el('td', { class: 'num night-col', text: d.totalTips === null ? '—' : money(d.nightTips) }),
@@ -1578,13 +1661,9 @@
 					el('th', { class: 'num', text: t('total') }),
 				])),
 				el('tbody', null, d.staff.map(function (x) {
-					const name = x.name || t('unknownServer');
-					return el('tr', null, [el('td', { class: 'name' }, x.name ? el('button', {
-						type: 'button',
-						class: 'link',
-						title: t('openPerson', { name: name }),
-						onclick: function () { openPerson(x.id, d.date); },
-					}, name) : name)].concat(cells('td', x)));
+					return el('tr', null, [
+						el('td', { class: 'name' }, personLink(x, function () { openPerson(x.id, d.date); })),
+					].concat(cells('td', x)));
 				})),
 				el('tfoot', null, el('tr', null, [
 					el('th', { text: t('total') + ' (' + t(1 === d.staff.length ? 'peopleCountOne' : 'peopleCount', { n: d.staff.length }) + ')' }),
@@ -1616,7 +1695,7 @@
 		lines.push([s.from + ' ~ ' + s.to]);
 		lines.push([t('server'), t('colTips'), t('colHours'), t('colPerHour'), t('colDayHours'), t('colDayTips'), t('colNightHours'), t('colNightTips')]);
 		s.rows.forEach(function (r) {
-			lines.push([r.name || t('unknownServer'), C.centsToPlain(r.tips), C.formatHours(r.hours), C.centsToPlain(r.perHourCents),
+			lines.push([personName(r), C.centsToPlain(r.tips), C.formatHours(r.hours), C.centsToPlain(r.perHourCents),
 				C.formatHours(r.dayHours), C.centsToPlain(r.dayTips), C.formatHours(r.nightHours), C.centsToPlain(r.nightTips)]);
 		});
 		lines.push([t('total'), C.centsToPlain(s.totals.serverTips), C.formatHours(s.totals.hours), C.centsToPlain(s.totals.perHourCents),
@@ -1637,7 +1716,7 @@
 		lines.push([t('date'), t('server'), t('colDayHours'), t('colDayTips'), t('colNightHours'), t('colNightTips'), t('colHours'), t('colTips')]);
 		s.days.forEach(function (d) {
 			d.staff.forEach(function (x) {
-				lines.push([d.date, x.name || t('unknownServer'), C.formatHours(x.dayHours), C.centsToPlain(x.dayTips),
+				lines.push([d.date, personName(x), C.formatHours(x.dayHours), C.centsToPlain(x.dayTips),
 					C.formatHours(x.nightHours), C.centsToPlain(x.nightTips), C.formatHours(x.hours), C.centsToPlain(x.tips)]);
 			});
 		});
@@ -1648,60 +1727,41 @@
 	/* Reports → one server's hours and tips, day by day                   */
 	/* ------------------------------------------------------------------ */
 
-	/** Back to Reports, on the range the server's view was showing. */
-	function backToReports() {
-		S.personId = null;
-		render();
-		window.scrollTo(0, 0);
-	}
-
-	/** Reports → one server: totals and hours/tips for each day they worked. */
-	function renderPersonView(seq) {
-		const id = S.personId;
-		if (!S.servers.some(function (x) { return x.id === id; })) {
-			backToReports(); // the server was removed meanwhile
-			return;
-		}
-		// Switch to another server without going back to Reports.
+	/**
+	 * Reports → one person: a picker to switch person, back to Reports, the
+	 * Reports range, their totals and a row for each day they worked.
+	 * o: { label, people, id, pick(id), back(), load(input, r) → { row, list, mark(day) }, note }
+	 * `mark(day)`: that day's tips are not final yet (*), explained by the `note` key.
+	 */
+	function personView(seq, o) {
+		const id = o.id;
 		const picker = el('label', { class: 'field inline' }, [
-			el('span', { text: t('server') }),
+			el('span', { text: o.label }),
 			el('select', {
 				onchange: function (e) {
-					S.personId = e.target.value;
+					o.pick(e.target.value);
 					render();
 				},
-			}, serverStaff()
+			}, o.people
 				.filter(function (x) { return x.active || x.id === id; })
 				.map(function (x) { return el('option', { value: x.id, selected: x.id === id }, x.name); })),
 		]);
-
 		// Uses the Reports range, so going back shows the same period.
-		const kind = S.reportKind;
-		const r = rangeFor(kind, S.reportDate);
+		const r = rangeFor(S.reportKind, S.reportDate);
 		loadRange(seq, r.from, r.to, function (range) {
-			const s = C.summarize(calcInput(range), r.from, r.to);
-			const row = s.rows.find(function (x) { return x.id === id; });
-			const list = s.serverDays[id] || [];
-			const missing = {};
-			s.warnings.forEach(function (w) {
-				if ('missingTotal' === w.type) {
-					missing[w.date] = true;
-				}
-			});
-			const pending = list.some(function (d) { return missing[d.date] && d.nightHours > 0; });
-
+			const p = o.load(calcInput(range), r);
+			const row = p.row || { hours: 0, tips: 0, perHourCents: 0 };
+			const list = p.list;
+			const pending = list.some(p.mark);
 			// One card: back, name, period, totals, then the day-by-day table.
 			return el('section', { class: 'card person narrow' }, [
-				el('div', { class: 'row back-row' }, el('button', { type: 'button', class: 'btn ghost', onclick: backToReports }, t('backToReports'))),
+				el('div', { class: 'row back-row' }, el('button', { type: 'button', class: 'btn ghost', onclick: function () { go(o.back); } }, t('backToReports'))),
 				picker,
-				el('div', { class: 'range-bar' }, rangeControls(kind, r,
-					function (v) { S.reportKind = v; render(); },
-					function (d) { S.reportDate = d; render(); }
-				)),
+				el('div', { class: 'range-bar' }, rangeControls(r)),
 				el('div', { class: 'cards three' }, [
-					statCard(t('colHours'), C.formatHours(row ? row.hours : 0), 'accent'),
-					statCard(t('colTips'), money(row ? row.tips : 0), ''),
-					statCard(t('colPerHour'), money(row ? row.perHourCents : 0), ''),
+					statCard(t('colHours'), C.formatHours(row.hours), 'accent'),
+					statCard(t('colTips'), money(row.tips), ''),
+					statCard(t('colPerHour'), money(row.perHourCents), ''),
 				]),
 				list.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
 					el('thead', null, el('tr', null, [
@@ -1713,34 +1773,70 @@
 						return el('tr', null, [
 							el('td', { class: 'name', text: niceDate(d.date, true) }),
 							el('td', { class: 'num strong', text: C.formatHours(d.hours) }),
-							el('td', { class: 'num', text: money(d.tips) + (missing[d.date] && d.nightHours ? ' *' : '') }),
+							el('td', { class: 'num', text: money(d.tips) + (p.mark(d) ? ' *' : '') }),
 						]);
 					})),
 					el('tfoot', null, el('tr', null, [
 						el('th', { text: t('total') + ' (' + t(1 === list.length ? 'daysCountOne' : 'daysCount', { n: list.length }) + ')' }),
-						el('th', { class: 'num', text: C.formatHours(row ? row.hours : 0) }),
-						el('th', { class: 'num', text: money(row ? row.tips : 0) }),
+						el('th', { class: 'num', text: C.formatHours(row.hours) }),
+						el('th', { class: 'num', text: money(row.tips) }),
 					])),
 				])) : el('p', { class: 'muted', text: t('noWorkInRange') }),
-				pending ? el('p', { class: 'muted small', text: t('nightNotFinal') }) : null,
+				pending ? el('p', { class: 'muted small', text: t(o.note) }) : null,
 			]);
 		});
 	}
 
+	/** Reports → one server: totals and hours/tips for each day they worked. */
+	function renderPersonView(seq) {
+		const id = S.personId;
+		function back() {
+			S.personId = null;
+		}
+		if (!S.servers.some(function (x) { return x.id === id; })) {
+			go(back); // the server was removed meanwhile
+			return;
+		}
+		personView(seq, {
+			label: t('server'),
+			people: serverStaff(),
+			id: id,
+			pick: function (v) { S.personId = v; },
+			back: back,
+			note: 'nightNotFinal',
+			load: function (input, r) {
+				const s = C.summarize(input, r.from, r.to);
+				const missing = {}; // night tips are not final until the whole-day total is in
+				s.warnings.forEach(function (w) {
+					if ('missingTotal' === w.type) {
+						missing[w.date] = true;
+					}
+				});
+				return {
+					row: s.rows.find(function (x) { return x.id === id; }),
+					list: s.serverDays[id] || [],
+					mark: function (d) { return missing[d.date] && d.nightHours > 0; },
+				};
+			},
+		});
+	}
+
 	/* ------------------------------------------------------------------ */
-	/* Kitchen tab — the kitchen and sushi bar (one 40% pool, by hours)    */
-	/* The kitchen login sees only this; the admin also enters the hours.  */
+	/* Kitchen side — the kitchen and sushi bar (one 40% pool, by hours)   */
+	/* The kitchen login sees only this; the admin switches to it.         */
 	/* ------------------------------------------------------------------ */
 
 	const KITCHEN_TEAMS = ['sushi', 'kitchen']; // display order
 
+	/** A kitchen person's team ('sushi' | 'kitchen'; a removed person: kitchen). */
+	function kitchenTeamOf(x) {
+		return x.team || 'kitchen';
+	}
+
 	/** [{team, list}] for the kitchen teams that have someone in `list` (order kept). */
 	function kitchenGroups(list) {
 		return KITCHEN_TEAMS.map(function (team) {
-			return {
-				team: team,
-				list: list.filter(function (x) { return (x.team || 'kitchen') === team; }), // removed person: kitchen
-			};
+			return { team: team, list: list.filter(function (x) { return kitchenTeamOf(x) === team; }) };
 		}).filter(function (g) { return g.list.length; });
 	}
 
@@ -1751,7 +1847,7 @@
 
 	/** The kitchen's Daily entry: one date's hours. */
 	function renderKitchenEntry(seq) {
-		const date = S.kitchenDate || S.today;
+		const date = S.kitchenDate;
 		loadRange(seq, date, date, function (range) {
 			return kitchenHoursForm(date, calcInput(range));
 		});
@@ -1769,48 +1865,18 @@
 		});
 	}
 
-	function openKitchenPerson(id, date) {
-		if (date) {
-			S.reportDate = date;
-		}
-		S.kitchenPersonId = id;
-		render();
-		window.scrollTo(0, 0);
-	}
-
 	/** A date in the kitchen's Reports → that day in its Daily entry. */
 	function openKitchenDay(date) {
-		S.tab = 'entry';
-		S.kitchenDate = date;
-		render();
-		window.scrollTo(0, 0);
+		go(function () {
+			S.tab = 'entry';
+			S.kitchenDate = date;
+		});
 	}
 
 	function kitchenReport(s, r) {
 		const tot = s.totals;
-		const kind = S.reportKind;
 		const kitchenPct = 100 - s.serverPct;
-		const title = 'month' === kind ? monthLabel(s.from.slice(0, 7)) : rangeLabel(s.from, s.to);
-		const parts = [
-			el('header', { class: 'report-head print-only' }, [
-				S.settings.restaurant_name ? el('p', { class: 'eyebrow', text: S.settings.restaurant_name }) : null,
-				el('h2', { text: t('kitchenTitle') + ' · ' + title }),
-				'month' === kind ? el('p', { class: 'muted', text: rangeLabel(s.from, s.to) }) : null,
-			]),
-			el('div', { class: 'range-bar no-print' }, rangeControls(kind, r,
-				function (v) { S.reportKind = v; render(); },
-				function (d) { S.reportDate = d; render(); }
-			)),
-			el('div', { class: 'cards' }, [
-				statCard(t('cardTotalTips'), money(tot.tips), ''),
-				statCard(t('cardKitchen', { pct: kitchenPct }), money(tot.kitchen), 'accent'),
-				statCard(t('cardKitchenHours'), C.formatHours(tot.hours), ''),
-				statCard(t('colPerHour'), tot.perHourCents ? money(tot.perHourCents) : '—', ''),
-			]),
-		];
-		if (S.retentionStart && s.from < S.retentionStart) {
-			parts.push(el('div', { class: 'notice warn', text: t('retentionNote', { months: S.settings.retention_months, date: niceDate(S.retentionStart) }) }));
-		}
+		const parts = [];
 		s.warnings.forEach(function (w) {
 			if ('missingTotal' === w.type) {
 				if (w.date !== S.today) { // normal until closing
@@ -1825,31 +1891,11 @@
 		});
 
 		parts.push(el('h3', { class: 'section-title', text: t('perPersonTitle') }));
-		parts.push(s.rows.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
-			el('thead', null, el('tr', null, [
-				el('th', { text: t('person') }),
-				el('th', { class: 'num', text: t('colTips') }),
-				el('th', { class: 'num', text: t('colHours') }),
-			])),
-			el('tbody', null, kitchenGroups(s.rows).map(function (g) {
-				return [groupRow(g.team, 3)].concat(g.list.map(function (x) {
-					const name = x.name || t('unknownServer');
-					return el('tr', null, [
-						el('td', { class: 'name' }, x.name ? el('button', {
-							type: 'button', class: 'link', title: t('openPerson', { name: name }),
-							onclick: function () { openKitchenPerson(x.id); },
-						}, name) : name),
-						el('td', { class: 'num strong', text: money(x.tips) }),
-						el('td', { class: 'num', text: C.formatHours(x.hours) }),
-					]);
-				}));
-			})),
-			el('tfoot', null, el('tr', null, [
-				el('th', { text: t('total') }),
-				el('th', { class: 'num', text: money(tot.paid) }),
-				el('th', { class: 'num', text: C.formatHours(tot.hours) }),
-			])),
-		])) : el('p', { class: 'muted', text: t('noData') }));
+		parts.push(s.rows.length
+			? personTable(t('person'), s.rows, { tips: tot.paid, hours: tot.hours }, true, function (x) {
+				go(function () { S.kitchenPersonId = x.id; });
+			})
+			: el('p', { class: 'muted', text: t('noData') }));
 
 		if (s.days.length) {
 			parts.push(el('h3', { class: 'section-title', text: t('perDayTitle') }));
@@ -1864,7 +1910,6 @@
 					el('th', { class: 'num', text: t('colLeftover') }),
 				])),
 				el('tbody', null, s.days.map(function (d) {
-					const label = niceDate(d.date, true);
 					let total = '—';
 					if (d.hasTips) {
 						total = d.final ? money(d.totalTips) : t('missing');
@@ -1876,10 +1921,7 @@
 						left = money(d.leftover);
 					}
 					return el('tr', null, [
-						el('td', { class: 'name' }, el('button', {
-							type: 'button', class: 'link', title: t('openKitchenDay', { date: label }),
-							onclick: function () { openKitchenDay(d.date); },
-						}, label)),
+						el('td', { class: 'name' }, dateLink(d.date, 'openKitchenDay', function () { openKitchenDay(d.date); })),
 						el('td', { class: 'num strong', text: total }),
 						el('td', { class: 'num', text: d.hasTips ? money(d.kitchen) + (d.final ? '' : ' *') : '—' }),
 						el('td', { class: 'num', text: d.hours ? C.formatHours(d.hours) : '—' }),
@@ -1892,11 +1934,12 @@
 				parts.push(el('p', { class: 'muted small', text: t('kitchenNotFinalNote') }));
 			}
 		}
-		parts.push(el('div', { class: 'row actions no-print' }, [
-			el('button', { type: 'button', class: 'btn', onclick: function () { downloadKitchenCsv(s); } }, t('downloadCsv')),
-			el('button', { type: 'button', class: 'btn', onclick: function () { window.print(); } }, t('print')),
-		]));
-		return el('section', { class: 'card report' }, parts);
+		return reportCard(s, r, t('kitchenTitle') + ' · ', [
+			statCard(t('cardTotalTips'), money(tot.tips), ''),
+			statCard(t('cardKitchen', { pct: kitchenPct }), money(tot.kitchen), 'accent'),
+			statCard(t('cardKitchenHours'), C.formatHours(tot.hours), ''),
+			statCard(t('colPerHour'), tot.perHourCents ? money(tot.perHourCents) : '—', ''),
+		], parts, function () { downloadKitchenCsv(s); });
 	}
 
 	function downloadKitchenCsv(s) {
@@ -1904,7 +1947,7 @@
 		lines.push([t('kitchenTitle'), s.from + ' ~ ' + s.to]);
 		lines.push([t('team'), t('person'), t('colTips'), t('colHours'), t('colPerHour')]);
 		s.rows.forEach(function (r) {
-			lines.push([teamLabel(r.team || 'kitchen'), r.name || t('unknownServer'), C.centsToPlain(r.tips), C.formatHours(r.hours), C.centsToPlain(r.perHourCents)]);
+			lines.push([teamLabel(kitchenTeamOf(r)), personName(r), C.centsToPlain(r.tips), C.formatHours(r.hours), C.centsToPlain(r.perHourCents)]);
 		});
 		lines.push(['', t('total'), C.centsToPlain(s.totals.paid), C.formatHours(s.totals.hours), C.centsToPlain(s.totals.perHourCents)]);
 		lines.push([]);
@@ -1920,7 +1963,7 @@
 		lines.push([t('date'), t('team'), t('person'), t('colHours'), t('colTips')]);
 		s.days.forEach(function (d) {
 			d.staff.forEach(function (x) {
-				lines.push([d.date, teamLabel(x.team || 'kitchen'), x.name || t('unknownServer'), C.formatHours(x.hours), C.centsToPlain(x.tips)]);
+				lines.push([d.date, teamLabel(kitchenTeamOf(x)), personName(x), C.formatHours(x.hours), C.centsToPlain(x.tips)]);
 			});
 		});
 		downloadCsvFile('kitchen_tips_' + s.from + '_' + s.to + '.csv', lines);
@@ -1935,74 +1978,34 @@
 			render();
 			return;
 		}
-		const picker = el('label', { class: 'field inline' }, [
-			el('span', { text: t('person') }),
-			el('select', {
-				onchange: function (e) {
-					S.kitchenPersonId = e.target.value;
-					render();
-				},
-			}, people
-				.filter(function (x) { return x.active || x.id === id; })
-				.map(function (x) { return el('option', { value: x.id, selected: x.id === id }, x.name); })),
-		]);
-		const kind = S.reportKind;
-		const r = rangeFor(kind, S.reportDate);
-		loadRange(seq, r.from, r.to, function (range) {
-			const s = C.summarizeKitchen(calcInput(range), r.from, r.to);
-			const row = s.rows.find(function (x) { return x.id === id; });
-			const list = s.personDays[id] || [];
-			const pending = list.some(function (d) { return !d.final; });
-			return el('section', { class: 'card person narrow' }, [
-				el('div', { class: 'row back-row' }, el('button', {
-					type: 'button', class: 'btn ghost',
-					onclick: function () { S.kitchenPersonId = null; render(); window.scrollTo(0, 0); },
-				}, t('backToReports'))),
-				picker,
-				el('div', { class: 'range-bar' }, rangeControls(kind, r,
-					function (v) { S.reportKind = v; render(); },
-					function (d) { S.reportDate = d; render(); }
-				)),
-				el('div', { class: 'cards three' }, [
-					statCard(t('colHours'), C.formatHours(row ? row.hours : 0), 'accent'),
-					statCard(t('colTips'), money(row ? row.tips : 0), ''),
-					statCard(t('colPerHour'), money(row ? row.perHourCents : 0), ''),
-				]),
-				list.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid report-grid' }, [
-					el('thead', null, el('tr', null, [
-						el('th', { text: t('date') }),
-						el('th', { class: 'num', text: t('colHours') }),
-						el('th', { class: 'num', text: t('colTips') }),
-					])),
-					el('tbody', null, list.map(function (d) {
-						return el('tr', null, [
-							el('td', { class: 'name', text: niceDate(d.date, true) }),
-							el('td', { class: 'num strong', text: C.formatHours(d.hours) }),
-							el('td', { class: 'num', text: money(d.tips) + (d.final ? '' : ' *') }),
-						]);
-					})),
-					el('tfoot', null, el('tr', null, [
-						el('th', { text: t('total') + ' (' + t(1 === list.length ? 'daysCountOne' : 'daysCount', { n: list.length }) + ')' }),
-						el('th', { class: 'num', text: C.formatHours(row ? row.hours : 0) }),
-						el('th', { class: 'num', text: money(row ? row.tips : 0) }),
-					])),
-				])) : el('p', { class: 'muted', text: t('noWorkInRange') }),
-				pending ? el('p', { class: 'muted small', text: t('kitchenNotFinalNote') }) : null,
-			]);
+		personView(seq, {
+			label: t('person'),
+			people: people,
+			id: id,
+			pick: function (v) { S.kitchenPersonId = v; },
+			back: function () { S.kitchenPersonId = null; },
+			note: 'kitchenNotFinalNote',
+			load: function (input, r) {
+				const s = C.summarizeKitchen(input, r.from, r.to);
+				return {
+					row: s.rows.find(function (x) { return x.id === id; }),
+					list: s.personDays[id] || [],
+					mark: function (d) { return !d.final; },
+				};
+			},
 		});
 	}
 
 	/**
 	 * The kitchen's Daily entry: the kitchen and sushi bar hours of one date,
 	 * next to that day's total tips (from the servers' entry, read-only).
-	 * Saves itself like the daily tips (see saveBar / markField): the whole
-	 * date is sent each time, so it is always exactly what is on screen.
-	 * Locks like the daily tips too: a past day opens read-only until Edit is
-	 * tapped, and stays open until Done is tapped.
+	 * Saves itself like the daily tips (see autoSaver): the whole date is sent
+	 * each time, so it is always exactly what is on screen. Locks like the
+	 * daily tips too (see dayLock).
 	 */
 	function kitchenHoursForm(date, input) {
 		const pct = S.settings.server_pct;
-		const lock = dayLock(date, lockReason(date, null)); // the same dates as the daily tips
+		const lock = dayLock(date);
 		const readOnly = lock.readOnly;
 		const saved = {};
 		input.kitchenHours.forEach(function (h) {
@@ -2013,30 +2016,18 @@
 		const day = input.days.find(function (d) { return d.date === date; }) || null;
 		const people = kitchenStaff().filter(function (x) { return x.active || saved[x.id]; });
 
-		let timer = null;
-		let inFlight = null;
-		let again = false;
-		let alive = true;
 		let dirty = false;
-		let blocked = null; // why it can't be saved yet
-		const edits = new Map();
 		const fields = {};
 		const shareCells = {};
-		const footHours = el('th', { class: 'num' }, '0');
-		const footShare = el('th', { class: 'num' }, '—');
+		const foot = { hours: el('th', { class: 'num' }, '0'), share: el('th', { class: 'num' }, '—') };
 		const leftoverLine = el('p', { class: 'split-line' });
-		const bar = saveBar(function () { saveNow(); });
 
+		/** The typed hours (`soft`: see softValue). */
 		function read(soft) {
 			const out = { hours: [], bad: [], typing: false };
 			people.forEach(function (p) {
 				const field = fields[p.id];
-				let v = field.value.trim();
-				// Same rule as the daily tips: "2." on the way to 2.25 is not wrong yet.
-				if (soft && field === document.activeElement && v !== '' && C.parseHours(v) === null && UNFINISHED_HOURS.test(v)) {
-					out.typing = true;
-					v = v.replace(/[.,:]\d?$/, '');
-				}
+				const v = softValue(field, C.parseHours, UNFINISHED_HOURS, soft, out);
 				const h = v === '' ? 0 : C.parseHours(v);
 				field.classList.toggle('invalid', h === null);
 				if (h === null) {
@@ -2057,192 +2048,89 @@
 				kitchenHours: f.hours.map(function (h) { return { date: date, staffId: h.server_id, hundredths: h.hundredths }; }),
 			}, date, date);
 			const d = s.days[0] || null;
+			const tips = {};
+			(d ? d.staff : []).forEach(function (x) { tips[x.id] = x.tips; });
 			people.forEach(function (p) {
-				const x = d ? d.staff.find(function (y) { return y.id === p.id; }) : null;
-				shareCells[p.id].replaceChildren(x && x.tips ? el('strong', { text: money(x.tips) }) : '—');
+				shareCells[p.id].replaceChildren(tips[p.id] ? el('strong', { text: money(tips[p.id]) }) : '—');
 			});
-			footHours.textContent = C.formatHours(d ? d.hours : 0);
-			footShare.textContent = d && d.hasTips ? money(d.paid) : '—';
+			foot.hours.textContent = C.formatHours(d ? d.hours : 0);
+			foot.share.textContent = d && d.hasTips ? money(d.paid) : '—';
 			leftoverLine.textContent = d && d.leftover > 0 ? t('leftoverLine', { amount: money(d.leftover) }) : '';
 		}
 
-		function scheduleSave() {
-			clearTimeout(timer);
-			timer = setTimeout(function () { saveNow(false, true); }, AUTOSAVE_MS);
-			bar.set('saving');
-		}
-
-		function saveNow(keepalive, soft) {
-			clearTimeout(timer);
-			timer = null;
-			if (inFlight) {
-				again = again || dirty;
-				return inFlight;
-			}
-			if (!dirty) {
-				return null;
-			}
-			const f = read(soft);
-			if (f.typing) {
-				timer = setTimeout(function () { saveNow(false, true); }, AUTOSAVE_MS); // leaving the field saves it
-				return null;
-			}
-			if (f.bad.length) {
-				blocked = t('errBadHours', { names: f.bad.join(', ') });
-				bar.set('blocked', blocked);
-				return null;
-			}
-			blocked = null;
-			dirty = false;
-			bar.set('saving');
-			const sentEdits = new Map(edits);
-			inFlight = API.rpc('save_kitchen_hours', {
-				p_token: S.token,
-				p_date: date,
-				p_hours: f.hours,
-			}, { keepalive: !!keepalive })
-				.then(function () {
-					sentEdits.forEach(function (n, field) {
-						if (edits.get(field) === n) {
-							edits.delete(field);
-							markField(field, 'saved');
-						}
-					});
-					if (!dirty) {
-						bar.set('saved');
-					}
-				}, function (e) {
-					if (e && 'locked' === e.code) {
-						// The database closed the day (e.g. it is no longer kept).
-						again = false;
-						toast(t('err_locked'), 'error');
-						S.unlock = null; // nothing left to finish
-						if (alive) {
-							refreshBootstrap().catch(function () {}).then(render);
-						}
-						return;
-					}
-					dirty = true;
-					if (e && e.code === 'not_authenticated') {
-						handleError(e);
-					} else if (alive) {
-						bar.set('failed', errMessage(e));
-					} else {
-						toast(errMessage(e), 'error'); // the form is gone: say so instead
-					}
-				}).then(function () {
-					inFlight = null;
-					if (again && alive) {
-						again = false;
-						saveNow(false, true);
-					}
-				});
-			return inFlight;
-		}
-
-		function leave() {
-			saveNow();
-			if (needsDone()) {
+		const saver = autoSaver({
+			isDirty: function () { return dirty; },
+			take: function () {
+				dirty = false;
+				return true;
+			},
+			giveBack: function () { dirty = true; },
+			clear: function () { dirty = false; },
+			prepare: function (soft) {
+				const f = read(soft);
+				if (f.typing) {
+					return { typing: true };
+				}
+				return {
+					problem: f.bad.length ? { msg: t('errBadHours', { names: f.bad.join(', ') }) } : null,
+					send: function (sent, keepalive) {
+						return API.rpc('save_kitchen_hours', { p_token: S.token, p_date: date, p_hours: f.hours }, { keepalive: keepalive });
+					},
+				};
+			},
+			restore: function () {
+				S.side = 'kitchen';
+				S.tab = 'entry';
+				S.kitchenDate = date;
 				picker.input.value = date;
-				return false;
-			}
-			if (blocked && dirty && !window.confirm(t('leaveUnsaved', { reason: blocked }))) {
-				picker.input.value = date;
-				return false;
-			}
-			alive = false;
-			return inFlight;
-		}
+			},
+		});
 
 		function onInput(e) {
 			dirty = true;
-			edits.set(e.target, (edits.get(e.target) || 0) + 1);
-			markField(e.target, 'pending');
 			update();
-			scheduleSave();
+			saver.input(e.target);
 		}
 
 		const picker = dayPicker(date, function (d) {
 			S.kitchenDate = d;
 			render();
-		}, editButton(date, lock));
+		}, lock);
 
 		let poolLine;
 		if (!day) {
 			poolLine = el('p', { class: 'notice warn', text: t('kitchenNoTips') });
 		} else {
-			const pool = C.summarizeKitchen({ serverPct: pct, staff: [], days: [day], kitchenHours: [] }, date, date).totals;
 			// The hours total is in the table's last row, live while typing.
 			poolLine = el('div', null, [
 				el('div', { class: 'cards' }, [
 					statCard(t('cardTotalTips'), day.totalTips === null ? t('missing') : money(day.totalTips), ''),
-					statCard(t('cardKitchen', { pct: 100 - pct }), money(pool.kitchen) + (day.totalTips === null ? ' *' : ''), 'accent'),
+					statCard(t('cardKitchen', { pct: 100 - pct }), money(C.kitchenPool(day, pct)) + (day.totalTips === null ? ' *' : ''), 'accent'),
 				]),
 				day.totalTips === null ? el('p', { class: 'muted small', text: t('kitchenNotFinalNote') }) : null,
 			]);
 		}
 
-		const table = people.length ? el('div', { class: 'table-wrap' }, el('table', { class: 'grid entry-grid' }, [
-			el('colgroup', null, [el('col', { class: 'col-name' }), el('col', { class: 'col-hours' }), el('col', { class: 'col-share' })]),
-			el('thead', null, el('tr', null, [
-				el('th', { text: t('person') }),
-				el('th', { text: t('hours') }),
-				el('th', { class: 'num', text: t('share') }),
-			])),
-			el('tbody', null, kitchenGroups(people).map(function (g) {
-				return [groupRow(g.team, 3)].concat(g.list.map(function (p) {
-					fields[p.id] = el('input', {
-						type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: '0',
-						'aria-label': p.name + ' ' + t('hours'),
-						value: saved[p.id] ? C.formatHours(saved[p.id]) : '', disabled: readOnly, oninput: onInput,
-					});
-					shareCells[p.id] = el('td', { class: 'num share' }, '—');
-					return el('tr', null, [
-						el('td', { class: 'name' }, [p.name, p.active ? null : el('span', { class: 'tag', text: t('inactiveTag') })]),
-						el('td', { class: 'hours-cell' }, fields[p.id]),
-						shareCells[p.id],
-					]);
-				}));
-			})),
-			el('tfoot', null, el('tr', null, [el('th', { text: t('total') }), footHours, footShare])),
-		])) : el('p', { class: 'notice warn' }, [
-			t('noKitchenStaffYet') + ' ',
-			el('button', { type: 'button', class: 'btn small', onclick: function () { S.tab = 'staff'; render(); } }, t('goToPeople')),
-		]);
+		const table = people.length ? hoursTable(t('person'), kitchenGroups(people).map(function (g) {
+			return [groupRow(g.team, 3)].concat(g.list.map(function (p) {
+				fields[p.id] = hoursInput(p.name, saved[p.id] ? C.formatHours(saved[p.id]) : '', readOnly, onInput);
+				shareCells[p.id] = el('td', { class: 'num share' }, '—');
+				return hoursRow(p, fields[p.id], shareCells[p.id]);
+			}));
+		}), foot) : noStaffNotice('noKitchenStaffYet', 'goToPeople');
 
-		const form = el('form', {
-			class: 'card narrow',
-			novalidate: true,
-			onsubmit: function (ev) {
-				ev.preventDefault(); // Enter / the keyboard's Go key saves now
-				saveNow();
-			},
-		}, [
+		const form = el('form', { class: 'card narrow', novalidate: true }, [
 			picker.node,
-			dayStatus(lock, leave),
-			people.length && !readOnly ? bar.node : null,
+			dayStatus(lock),
+			people.length && !readOnly ? saver.bar.node : null,
 			poolLine,
 			table,
 			leftoverLine,
 			people.length && !readOnly ? el('p', { class: 'muted small', text: t('kitchenHoursHelp') }) : null,
 		]);
-		// Leaving a field saves it right away (no need to wait 1.5 s).
-		form.addEventListener('focusout', function () {
-			if (timer) {
-				saveNow();
-			}
-		});
-		entryForm = readOnly ? null : {
-			flush: saveNow,
-			leave: leave,
-			restore: function () {
-				S.side = 'kitchen';
-				S.tab = 'entry';
-				S.kitchenDate = date;
-			},
-			unsaved: function () { return dirty; },
-		};
-		bar.set(Object.keys(saved).length ? 'stored' : 'idle');
+		const opened = saver.attach(form);
+		entryForm = readOnly ? null : opened;
+		saver.bar.set(Object.keys(saved).length ? 'stored' : 'idle');
 		update();
 		return form;
 	}
@@ -2389,12 +2277,11 @@
 		}
 
 		// The kitchen side: one group per team; the servers' side: one list.
-		const groups = kitchenSide ? KITCHEN_TEAMS.map(function (team) {
-			const people = list.filter(function (x) { return teamOf(x) === team; });
-			return people.length ? [
-				el('h3', { class: 'section-title', text: teamLabel(team) + ' (' + people.length + ')' }),
-				el('ul', { class: 'server-list' }, people.map(row)),
-			] : null;
+		const groups = kitchenSide ? kitchenGroups(list).map(function (g) {
+			return [
+				el('h3', { class: 'section-title', text: teamLabel(g.team) + ' (' + g.list.length + ')' }),
+				el('ul', { class: 'server-list' }, g.list.map(row)),
+			];
 		}) : el('ul', { class: 'server-list' }, list.map(row));
 
 		let help = 'staffHelp';

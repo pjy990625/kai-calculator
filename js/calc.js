@@ -297,9 +297,50 @@
 		return day.totalTips === null || day.totalTips === undefined ? 0 : day.totalTips - day.dayTips;
 	}
 
+	/** The kitchen's part of a day (both shifts; the night counts once the total is in). */
+	function kitchenPool(day, pct) {
+		return SHIFTS.reduce(function (sum, shift) {
+			const tips = 'day' === shift ? day.dayTips : nightTips(day);
+			return sum + tips - serverPool(tips, pct);
+		}, 0);
+	}
+
 	/* ------------------------------------------------------------------ */
 	/* Summaries                                                           */
 	/* ------------------------------------------------------------------ */
+
+	/** Cents per hour (hours in hundredths), rounded to the cent; 0 without hours. */
+	function perHour(cents, hours) {
+		return hours > 0 ? Math.round(cents * 100 / hours) : 0;
+	}
+
+	/** id → position in `list`, and a comparator in that order (unknown ids last, then by id). */
+	function ordering(list) {
+		const index = {};
+		list.forEach(function (x, i) { index[x.id] = i; });
+		return {
+			index: index,
+			compare: function (a, b) {
+				const ia = index[a] === undefined ? Infinity : index[a];
+				const ib = index[b] === undefined ? Infinity : index[b];
+				if (ia !== ib) {
+					return ia < ib ? -1 : 1;
+				}
+				return a < b ? -1 : (a > b ? 1 : 0);
+			},
+		};
+	}
+
+	/** Hours entries with hours in [from, to], grouped by date. */
+	function hoursByDate(list, from, to) {
+		const out = {};
+		list.forEach(function (h) {
+			if (h.date >= from && h.date <= to && h.hundredths > 0) {
+				(out[h.date] = out[h.date] || []).push(h);
+			}
+		});
+		return out;
+	}
 
 	function emptyTotals() {
 		return { dayHours: 0, nightHours: 0, hours: 0, dayTips: 0, nightTips: 0, tips: 0, perHourCents: 0 };
@@ -308,7 +349,7 @@
 	function finishRow(r) {
 		r.hours = r.dayHours + r.nightHours;
 		r.tips = r.dayTips + r.nightTips;
-		r.perHourCents = r.hours > 0 ? Math.round(r.tips * 100 / r.hours) : 0;
+		r.perHourCents = perHour(r.tips, r.hours);
 		return r;
 	}
 
@@ -323,23 +364,10 @@
 	 */
 	function summarize(input, from, to) {
 		const pct = input.serverPct;
-		const order = {};
-		input.servers.forEach(function (s, i) { order[s.id] = i; });
-		function byServerOrder(a, b) {
-			const ia = order[a] === undefined ? Infinity : order[a];
-			const ib = order[b] === undefined ? Infinity : order[b];
-			if (ia !== ib) {
-				return ia < ib ? -1 : 1;
-			}
-			return a < b ? -1 : (a > b ? 1 : 0);
-		}
-
-		const hoursByDate = {};
-		input.hours.forEach(function (h) {
-			if (h.date >= from && h.date <= to && h.hundredths > 0) {
-				(hoursByDate[h.date] = hoursByDate[h.date] || []).push(h);
-			}
-		});
+		const ord = ordering(input.servers);
+		const order = ord.index;
+		const byServerOrder = ord.compare;
+		const hoursOn = hoursByDate(input.hours, from, to);
 
 		const rows = {};
 		const serverDays = {}; // serverId → [{date, dayHours, nightHours, dayTips, nightTips, hours, tips}]
@@ -394,7 +422,7 @@
 					warnings.push({ type: 'missingTotal', date: d.date });
 				}
 				SHIFTS.forEach(function (shift) {
-					const entries = (hoursByDate[d.date] || [])
+					const entries = (hoursOn[d.date] || [])
 						.filter(function (h) { return h.shift === shift; })
 						.sort(function (a, b) { return byServerOrder(a.serverId, b.serverId); })
 						.map(function (h) { return { key: h.serverId, weight: h.hundredths }; });
@@ -428,8 +456,7 @@
 					}
 				});
 				detail.staff = Object.keys(staff).sort(byServerOrder).map(function (id) { return finishRow(staff[id]); });
-				const dayHours = detail.dayHours + detail.nightHours;
-				detail.perHourCents = dayHours > 0 ? Math.round(detail.paid * 100 / dayHours) : 0;
+				detail.perHourCents = perHour(detail.paid, detail.dayHours + detail.nightHours);
 				dayList.push(detail);
 			});
 
@@ -443,7 +470,7 @@
 		});
 		totals.hours = totals.dayHours + totals.nightHours;
 		totals.tips = totals.dayTips + totals.nightTips;
-		totals.perHourCents = totals.hours > 0 ? Math.round(totals.serverTips * 100 / totals.hours) : 0;
+		totals.perHourCents = perHour(totals.serverTips, totals.hours);
 
 		return {
 			from: from,
@@ -473,16 +500,9 @@
 	 */
 	function summarizeKitchen(input, from, to) {
 		const pct = input.serverPct;
-		const order = {};
-		input.staff.forEach(function (x, i) { order[x.id] = i; });
-		function byOrder(a, b) {
-			const ia = order[a] === undefined ? Infinity : order[a];
-			const ib = order[b] === undefined ? Infinity : order[b];
-			if (ia !== ib) {
-				return ia < ib ? -1 : 1;
-			}
-			return a < b ? -1 : (a > b ? 1 : 0);
-		}
+		const ord = ordering(input.staff);
+		const order = ord.index;
+		const byOrder = ord.compare;
 		function info(id) {
 			const i = order[id];
 			return i === undefined ? { name: null, team: null } : { name: input.staff[i].name, team: input.staff[i].team };
@@ -494,13 +514,8 @@
 				tipsByDate[d.date] = d;
 			}
 		});
-		const hoursByDate = {};
-		input.kitchenHours.forEach(function (h) {
-			if (h.date >= from && h.date <= to && h.hundredths > 0) {
-				(hoursByDate[h.date] = hoursByDate[h.date] || []).push(h);
-			}
-		});
-		const dates = Object.keys(Object.assign({}, tipsByDate, hoursByDate)).sort();
+		const hoursOn = hoursByDate(input.kitchenHours, from, to);
+		const dates = Object.keys(Object.assign({}, tipsByDate, hoursOn)).sort();
 
 		const rows = {};
 		const personDays = {}; // id → [{date, hours, tips, final}]
@@ -508,15 +523,9 @@
 		const warnings = [];
 		const dayList = dates.map(function (date) {
 			const d = tipsByDate[date] || null;
-			let kitchen = 0;
-			if (d) {
-				SHIFTS.forEach(function (shift) {
-					const tips = 'day' === shift ? d.dayTips : nightTips(d);
-					kitchen += tips - serverPool(tips, pct);
-				});
-			}
+			const kitchen = d ? kitchenPool(d, pct) : 0;
 			const final = !!d && d.totalTips !== null && d.totalTips !== undefined;
-			const entries = (hoursByDate[date] || [])
+			const entries = (hoursOn[date] || [])
 				.sort(function (a, b) { return byOrder(a.staffId, b.staffId); })
 				.map(function (h) { return { key: h.staffId, weight: h.hundredths }; });
 			const shares = splitWholeDollars(kitchen, 100, entries);
@@ -556,7 +565,7 @@
 			if (d && !final) {
 				warnings.push({ type: 'missingTotal', date: date });
 			}
-			detail.perHourCents = hours > 0 ? Math.round(detail.paid * 100 / hours) : 0;
+			detail.perHourCents = perHour(detail.paid, hours);
 			totals.tips += d ? d.dayTips + nightTips(d) : 0;
 			totals.kitchen += kitchen;
 			totals.paid += detail.paid;
@@ -565,10 +574,10 @@
 			totals.hours += hours;
 			return detail;
 		});
-		totals.perHourCents = totals.hours > 0 ? Math.round(totals.paid * 100 / totals.hours) : 0;
+		totals.perHourCents = perHour(totals.paid, totals.hours);
 		const list = Object.keys(rows).sort(byOrder).map(function (id) {
 			const r = rows[id];
-			r.perHourCents = r.hours > 0 ? Math.round(r.tips * 100 / r.hours) : 0;
+			r.perHourCents = perHour(r.tips, r.hours);
 			return r;
 		});
 		return {
@@ -606,6 +615,7 @@
 		serverPool: serverPool,
 		splitShift: splitShift,
 		nightTips: nightTips,
+		kitchenPool: kitchenPool,
 		summarize: summarize,
 		summarizeKitchen: summarizeKitchen,
 	};
